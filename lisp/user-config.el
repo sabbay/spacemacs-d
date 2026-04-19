@@ -120,7 +120,7 @@
 
 Bypasses `switch-to-buffer' entirely (helm-mode advises that and would
 pop up a buffer picker instead of switching). We set the window buffer
-directly on the new frame's root window."
+directly on the new frame's selected window."
   (let* ((buf (find-file-noselect abs-path))
          (w (display-pixel-width))
          (h (display-pixel-height))
@@ -132,11 +132,15 @@ directly on the new frame's root window."
                    (height . 50)
                    (left . ,(/ w 12))
                    (top  . ,(/ h 12))
-                   (unsplittable . t)))))
+                   (unsplittable . t))))
+         ;; On NS Emacs 30.2, `frame-root-window' of a freshly-made frame
+         ;; can return a non-live internal window; `frame-selected-window'
+         ;; is the live leaf we can actually `set-window-buffer' on.
+         (win (frame-selected-window frame)))
     ;; Install the buffer without going through switch-to-buffer —
     ;; that avoids helm-mode / ido-mode advice hijacking.
-    (set-window-buffer (frame-root-window frame) buf)
-    (set-frame-selected-window frame (frame-root-window frame))
+    (set-window-buffer win buf)
+    (set-frame-selected-window frame win)
     (with-current-buffer buf
       (unless (derived-mode-p 'image-mode) (image-mode))
       (when (fboundp 'image-transform-fit-to-window)
@@ -212,7 +216,7 @@ externally. Return non-nil when we handled the link."
 ;; edit it as a normal source file (not as an Elisp string).
 
 (defvar my/markdown-preview-header-file
-  (expand-file-name "assets/markdown-preview-header.html" user-emacs-directory)
+  (expand-file-name "assets/markdown-preview-header.html" dotspacemacs-directory)
   "Path to the pandoc header-include used by the markdown preview.")
 
 (setq markdown-command

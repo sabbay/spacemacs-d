@@ -576,7 +576,7 @@ If you are unsure, try setting them in `dotspacemacs/user-config' first.
 
 Body lives in lisp/user-init.el so it can be edited as a normal source file
 and tracked in git independently of this dotfile."
-  (load (expand-file-name "lisp/user-init.el" user-emacs-directory)))
+  (load (expand-file-name "lisp/user-init.el" dotspacemacs-directory)))
 
 (defun dotspacemacs/user-config ()
   "Configuration for user code:
@@ -587,7 +587,7 @@ before packages are loaded.
 
 Body lives in lisp/user-config.el so it can be edited as a normal source file
 and tracked in git independently of this dotfile."
-  (load (expand-file-name "lisp/user-config.el" user-emacs-directory)))
+  (load (expand-file-name "lisp/user-config.el" dotspacemacs-directory)))
 
 
 ;; Do not write anything past this comment. This is where Emacs will
