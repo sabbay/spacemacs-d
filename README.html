@@ -1,0 +1,766 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>-</title>
+  <style>
+    /* Default styles provided by pandoc.
+    ** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+    */
+    html {
+      color: #1a1a1a;
+      background-color: #fdfdfd;
+    }
+    body {
+      margin: 0 auto;
+      max-width: 36em;
+      padding-left: 50px;
+      padding-right: 50px;
+      padding-top: 50px;
+      padding-bottom: 50px;
+      hyphens: auto;
+      overflow-wrap: break-word;
+      text-rendering: optimizeLegibility;
+      font-kerning: normal;
+    }
+    @media (max-width: 600px) {
+      body {
+        font-size: 0.9em;
+        padding: 12px;
+      }
+      h1 {
+        font-size: 1.8em;
+      }
+    }
+    @media print {
+      html {
+        background-color: white;
+      }
+      body {
+        background-color: transparent;
+        color: black;
+        font-size: 12pt;
+      }
+      p, h2, h3 {
+        orphans: 3;
+        widows: 3;
+      }
+      h2, h3, h4 {
+        page-break-after: avoid;
+      }
+    }
+    p {
+      margin: 1em 0;
+    }
+    a {
+      color: #1a1a1a;
+    }
+    a:visited {
+      color: #1a1a1a;
+    }
+    img {
+      max-width: 100%;
+    }
+    svg {
+      height: auto;
+      max-width: 100%;
+    }
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.4em;
+    }
+    h5, h6 {
+      font-size: 1em;
+      font-style: italic;
+    }
+    h6 {
+      font-weight: normal;
+    }
+    ol, ul {
+      padding-left: 1.7em;
+      margin-top: 1em;
+    }
+    li > ol, li > ul {
+      margin-top: 0;
+    }
+    blockquote {
+      margin: 1em 0 1em 1.7em;
+      padding-left: 1em;
+      border-left: 2px solid #e6e6e6;
+      color: #606060;
+    }
+    code {
+      white-space: pre-wrap;
+      font-family: Menlo, Monaco, Consolas, 'Lucida Console', monospace;
+      font-size: 85%;
+      margin: 0;
+      hyphens: manual;
+    }
+    pre {
+      margin: 1em 0;
+      overflow: auto;
+    }
+    pre code {
+      padding: 0;
+      overflow: visible;
+      overflow-wrap: normal;
+    }
+    .sourceCode {
+     background-color: transparent;
+     overflow: visible;
+    }
+    hr {
+      border: none;
+      border-top: 1px solid #1a1a1a;
+      height: 1px;
+      margin: 1em 0;
+    }
+    table {
+      margin: 1em 0;
+      border-collapse: collapse;
+      width: 100%;
+      overflow-x: auto;
+      display: block;
+      font-variant-numeric: lining-nums tabular-nums;
+    }
+    table caption {
+      margin-bottom: 0.75em;
+    }
+    tbody {
+      margin-top: 0.5em;
+      border-top: 1px solid #1a1a1a;
+      border-bottom: 1px solid #1a1a1a;
+    }
+    th {
+      border-top: 1px solid #1a1a1a;
+      padding: 0.25em 0.5em 0.25em 0.5em;
+    }
+    td {
+      padding: 0.125em 0.5em 0.25em 0.5em;
+    }
+    header {
+      margin-bottom: 4em;
+      text-align: center;
+    }
+    #TOC li {
+      list-style: none;
+    }
+    #TOC ul {
+      padding-left: 1.3em;
+    }
+    #TOC > ul {
+      padding-left: 0;
+    }
+    #TOC a:not(:hover) {
+      text-decoration: none;
+    }
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: min(4vw, 1.5em);}
+    div.column{flex: auto; overflow-x: auto;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+    /* CSS for syntax highlighting */
+    html { -webkit-text-size-adjust: 100%; }
+    pre > code.sourceCode { white-space: pre; position: relative; }
+    pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+    pre > code.sourceCode > span:empty { height: 1.2em; }
+    .sourceCode { overflow: visible; }
+    code.sourceCode > span { color: inherit; text-decoration: inherit; }
+    div.sourceCode { margin: 1em 0; }
+    pre.sourceCode { margin: 0; }
+    @media screen {
+    div.sourceCode { overflow: auto; }
+    }
+    @media print {
+    pre > code.sourceCode { white-space: pre-wrap; }
+    pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+    }
+    pre.numberSource code
+      { counter-reset: source-line 0; }
+    pre.numberSource code > span
+      { position: relative; left: -4em; counter-increment: source-line; }
+    pre.numberSource code > span > a:first-child::before
+      { content: counter(source-line);
+        position: relative; left: -1em; text-align: right; vertical-align: baseline;
+        border: none; display: inline-block;
+        -webkit-touch-callout: none; -webkit-user-select: none;
+        -khtml-user-select: none; -moz-user-select: none;
+        -ms-user-select: none; user-select: none;
+        padding: 0 4px; width: 4em;
+        color: #aaaaaa;
+      }
+    pre.numberSource { margin-left: 3em; border-left: 1px solid #aaaaaa;  padding-left: 4px; }
+    div.sourceCode
+      {   }
+    @media screen {
+    pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+    }
+    code span.al { color: #ff0000; font-weight: bold; } /* Alert */
+    code span.an { color: #60a0b0; font-weight: bold; font-style: italic; } /* Annotation */
+    code span.at { color: #7d9029; } /* Attribute */
+    code span.bn { color: #40a070; } /* BaseN */
+    code span.bu { color: #008000; } /* BuiltIn */
+    code span.cf { color: #007020; font-weight: bold; } /* ControlFlow */
+    code span.ch { color: #4070a0; } /* Char */
+    code span.cn { color: #880000; } /* Constant */
+    code span.co { color: #60a0b0; font-style: italic; } /* Comment */
+    code span.cv { color: #60a0b0; font-weight: bold; font-style: italic; } /* CommentVar */
+    code span.do { color: #ba2121; font-style: italic; } /* Documentation */
+    code span.dt { color: #902000; } /* DataType */
+    code span.dv { color: #40a070; } /* DecVal */
+    code span.er { color: #ff0000; font-weight: bold; } /* Error */
+    code span.ex { } /* Extension */
+    code span.fl { color: #40a070; } /* Float */
+    code span.fu { color: #06287e; } /* Function */
+    code span.im { color: #008000; font-weight: bold; } /* Import */
+    code span.in { color: #60a0b0; font-weight: bold; font-style: italic; } /* Information */
+    code span.kw { color: #007020; font-weight: bold; } /* Keyword */
+    code span.op { color: #666666; } /* Operator */
+    code span.ot { color: #007020; } /* Other */
+    code span.pp { color: #bc7a00; } /* Preprocessor */
+    code span.sc { color: #4070a0; } /* SpecialChar */
+    code span.ss { color: #bb6688; } /* SpecialString */
+    code span.st { color: #4070a0; } /* String */
+    code span.va { color: #19177c; } /* Variable */
+    code span.vs { color: #4070a0; } /* VerbatimString */
+    code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } /* Warning */
+  </style>
+  <meta charset="utf-8">
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>
+    window.addEventListener('DOMContentLoaded', function () {
+      // Pandoc (gfm+sourcepos -> html5) emits fenced mermaid as
+      //   <pre class="mermaid"><code>...</code></pre>
+      // with the content HTML-entity-encoded (&quot; &lt; --&gt; etc.).
+      // If we leave that shape alone, mermaid's startOnLoad picks up the
+      // <pre class="mermaid"> and tries to parse the nested <code> tags
+      // as diagram source — Syntax error in text.
+      //
+      // Fix: peel off the <code> wrapper and replace with <div class="mermaid">
+      // whose textContent is the plain decoded diagram source. Handle both the
+      // pandoc shape and the GFM alt shape (<pre><code class="language-mermaid">).
+      var selectors = [
+        'pre.mermaid',
+        'pre.language-mermaid',
+        'pre > code.language-mermaid',
+        'pre > code.mermaid'
+      ];
+      document.querySelectorAll(selectors.join(',')).forEach(function (el) {
+        var pre = el.tagName === 'PRE' ? el : el.parentElement;
+        if (!pre || pre.dataset.mermaidConverted === '1') return;
+        var div = document.createElement('div');
+        div.className = 'mermaid';
+        div.textContent = pre.textContent;
+        pre.dataset.mermaidConverted = '1';
+        pre.parentNode.replaceChild(div, pre);
+      });
+      var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+      mermaid.initialize({ startOnLoad: false, theme: dark ? 'dark' : 'default', securityLevel: 'loose' });
+      mermaid.run().then(setupLightbox).catch(setupLightbox);
+    });
+
+    // ---- lightbox: click a mermaid SVG or image to enlarge ----
+    // Esc / backdrop click / × to close, wheel to zoom, drag to pan, 0 to reset.
+    function setupLightbox() {
+      if (document.getElementById('md-lightbox')) { wireZoomable(); return; }
+      var box = document.createElement('div');
+      box.id = 'md-lightbox';
+      box.innerHTML =
+        '<div class="md-lb-inner"></div>' +
+        '<button class="md-lb-close" aria-label="Close">×</button>' +
+        '<div class="md-lb-hint">click backdrop or Esc to close · wheel to zoom · drag to pan · 0 to reset</div>';
+      document.body.appendChild(box);
+      var inner = box.querySelector('.md-lb-inner');
+      var state = { scale: 1, x: 0, y: 0, dragging: false, sx: 0, sy: 0 };
+      function apply() {
+        inner.style.transform = 'translate(' + state.x + 'px,' + state.y + 'px) scale(' + state.scale + ')';
+      }
+      function reset() { state.scale = 1; state.x = 0; state.y = 0; apply(); }
+      function close() { box.classList.remove('open'); inner.innerHTML = ''; reset(); }
+      function open(el) {
+        var clone = el.cloneNode(true);
+        clone.removeAttribute('style');
+        if (clone.tagName && clone.tagName.toLowerCase() === 'svg') {
+          clone.removeAttribute('width');
+          clone.removeAttribute('height');
+          clone.style.width = '90vw';
+          clone.style.height = '85vh';
+        }
+        inner.innerHTML = '';
+        inner.appendChild(clone);
+        reset();
+        box.classList.add('open');
+      }
+      box.addEventListener('click', function (e) { if (e.target === box) close(); });
+      box.querySelector('.md-lb-close').addEventListener('click', close);
+      document.addEventListener('keydown', function (e) {
+        if (!box.classList.contains('open')) return;
+        if (e.key === 'Escape') close();
+        else if (e.key === '+' || e.key === '=') { state.scale = Math.min(8, state.scale * 1.2); apply(); }
+        else if (e.key === '-') { state.scale = Math.max(0.2, state.scale / 1.2); apply(); }
+        else if (e.key === '0') reset();
+      });
+      box.addEventListener('wheel', function (e) {
+        if (!box.classList.contains('open')) return;
+        e.preventDefault();
+        var d = e.deltaY < 0 ? 1.1 : 0.9;
+        state.scale = Math.max(0.2, Math.min(8, state.scale * d));
+        apply();
+      }, { passive: false });
+      inner.addEventListener('mousedown', function (e) {
+        state.dragging = true;
+        state.sx = e.clientX - state.x;
+        state.sy = e.clientY - state.y;
+        inner.style.cursor = 'grabbing';
+        e.preventDefault();
+      });
+      window.addEventListener('mousemove', function (e) {
+        if (!state.dragging) return;
+        state.x = e.clientX - state.sx;
+        state.y = e.clientY - state.sy;
+        apply();
+      });
+      window.addEventListener('mouseup', function () {
+        if (!state.dragging) return;
+        state.dragging = false;
+        inner.style.cursor = '';
+      });
+      window.__mdLightbox = { open: open, close: close };
+      wireZoomable();
+    }
+    function wireZoomable() {
+      var targets = document.querySelectorAll('div.mermaid svg, img');
+      targets.forEach(function (el) {
+        if (el.dataset.zoomable === '1') return;
+        el.dataset.zoomable = '1';
+        el.style.cursor = 'zoom-in';
+        el.addEventListener('click', function (e) {
+          if (!window.__mdLightbox) return;
+          e.preventDefault();
+          window.__mdLightbox.open(el);
+        });
+      });
+    }
+
+    // ---- cursor sync: called from Emacs via xwidget-webkit-execute-script ----
+    window.__mdHighlighted = null;
+    window.scrollToLine = function (line) {
+      var nodes = document.querySelectorAll('[data-pos]');
+      // Pick the innermost (smallest source-range) element containing LINE.
+      // Falls back to the nearest element before/after if none contains it.
+      var target = null, tStart = 0, tEnd = 0, tSpan = Infinity;
+      var before = null, bEnd = -1;
+      var after = null, aStart = Infinity;
+      for (var i = 0; i < nodes.length; i++) {
+        var m = nodes[i].getAttribute('data-pos').match(/@?(\d+):\d+-(\d+):\d+/);
+        if (!m) continue;
+        var s = parseInt(m[1], 10), e = parseInt(m[2], 10), span = e - s;
+        if (line >= s && line <= e) {
+          if (span < tSpan) { target = nodes[i]; tStart = s; tEnd = e; tSpan = span; }
+        } else if (e < line && e > bEnd) { before = nodes[i]; bEnd = e; }
+        else if (s > line && s < aStart) { after = nodes[i]; aStart = s; }
+      }
+      if (!target) {
+        target = before || after;
+        if (!target) return;
+        var mm = target.getAttribute('data-pos').match(/@?(\d+):\d+-(\d+):\d+/);
+        tStart = parseInt(mm[1], 10); tEnd = parseInt(mm[2], 10);
+      }
+      // Proportional scroll: map the cursor's position within the source range
+      // to the same fractional position within the rendered element's height.
+      var rect = target.getBoundingClientRect();
+      var absTop = rect.top + window.scrollY;
+      var span = Math.max(0, tEnd - tStart);
+      var frac = span > 0 ? Math.max(0, Math.min(1, (line - tStart) / span)) : 0;
+      var desiredTop = absTop + frac * rect.height - window.innerHeight / 2;
+      window.scrollTo({ top: Math.max(0, desiredTop), behavior: 'smooth' });
+      // Only flash highlight on element change, not on every intra-block move.
+      if (target !== window.__mdHighlighted) {
+        if (window.__mdHighlighted) {
+          window.__mdHighlighted.style.backgroundColor = '';
+          window.__mdHighlighted.style.transition = '';
+        }
+        target.style.transition = 'background-color .3s';
+        target.style.backgroundColor = 'rgba(255, 235, 59, .35)';
+        window.__mdHighlighted = target;
+        clearTimeout(window.__mdHighlightTimer);
+        window.__mdHighlightTimer = setTimeout(function () {
+          if (window.__mdHighlighted) window.__mdHighlighted.style.backgroundColor = '';
+          window.__mdHighlighted = null;
+        }, 1200);
+      }
+    };
+  </script>
+  <style>
+    body { max-width: 860px; margin: 2em auto; padding: 0 2em;
+           font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif;
+           line-height: 1.6; color: #24292f; }
+    h1, h2, h3, h4 { line-height: 1.25; }
+    h1, h2 { border-bottom: 1px solid #eaecef; padding-bottom: .3em; }
+    pre { background: #f6f8fa; padding: 1em; border-radius: 6px; overflow-x: auto; }
+    code { font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 85%; }
+    :not(pre) > code { background: rgba(175,184,193,.2); padding: .2em .4em; border-radius: 6px; }
+    pre code { background: none; padding: 0; font-size: 100%; }
+    blockquote { border-left: 4px solid #d0d7de; margin: 0; padding: 0 1em; color: #57606a; }
+    table { border-collapse: collapse; }
+    table th, table td { border: 1px solid #d0d7de; padding: 6px 13px; }
+    table tr:nth-child(2n) { background: #f6f8fa; }
+    img { max-width: 100%; }
+    a { color: #0969da; }
+    .mermaid { text-align: center; }
+    /* ---- lightbox ---- */
+    #md-lightbox {
+      position: fixed; inset: 0; z-index: 9999;
+      background: rgba(0,0,0,0.88);
+      display: none; align-items: center; justify-content: center;
+      overflow: hidden; user-select: none;
+    }
+    #md-lightbox.open { display: flex; }
+    #md-lightbox .md-lb-inner {
+      transform-origin: center center;
+      transition: transform 40ms linear;
+      cursor: grab;
+      max-width: 96vw; max-height: 92vh;
+      background: #fff; border-radius: 10px; padding: 1em;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+      display: flex; align-items: center; justify-content: center;
+    }
+    #md-lightbox .md-lb-inner > svg,
+    #md-lightbox .md-lb-inner > img {
+      width: auto; height: auto;
+      max-width: 90vw; max-height: 85vh;
+      display: block; pointer-events: none;
+    }
+    #md-lightbox .md-lb-close {
+      position: absolute; top: 1em; right: 1em;
+      background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.4);
+      color: #fff; font-size: 1.5em; line-height: 1;
+      width: 2em; height: 2em; border-radius: 50%; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+    }
+    #md-lightbox .md-lb-close:hover { background: rgba(255,255,255,0.2); }
+    #md-lightbox .md-lb-hint {
+      position: absolute; bottom: 1em; left: 0; right: 0;
+      text-align: center; color: #bbb; font-size: 0.8em;
+      pointer-events: none;
+    }
+    @media (prefers-color-scheme: dark) {
+      body { background: #0d1117; color: #c9d1d9; }
+      h1, h2 { border-bottom-color: #21262d; }
+      pre { background: #161b22; }
+      :not(pre) > code { background: rgba(110,118,129,.4); }
+      blockquote { border-left-color: #30363d; color: #8b949e; }
+      table th, table td { border-color: #30363d; }
+      table tr:nth-child(2n) { background: #161b22; }
+      a { color: #58a6ff; }
+      #md-lightbox .md-lb-inner { background: #1c1f24; }
+    }
+  </style>
+</head>
+<body>
+<h1 data-pos="1:1-2:1" id="spacemacs-configuration"><span
+data-wrapper="1" data-pos="1:3-1:12">Spacemacs</span><span
+data-wrapper="1" data-pos="1:12-1:13"> </span><span data-wrapper="1"
+data-pos="1:13-1:26">configuration</span></h1>
+<p data-pos="3:1-6:1"><span data-wrapper="1"
+data-pos="3:1-3:3">My</span><span data-wrapper="1" data-pos="3:3-3:4">
+</span><span data-wrapper="1" data-pos="3:4-3:13">Spacemacs</span><span
+data-wrapper="1" data-pos="3:13-3:14"> </span><span data-wrapper="1"
+data-pos="3:14-3:21">dotfile</span><span data-wrapper="1"
+data-pos="3:21-3:22">,</span><span data-wrapper="1"
+data-pos="3:22-3:23"> </span><span data-wrapper="1"
+data-pos="3:23-3:29">custom</span><span data-wrapper="1"
+data-pos="3:29-3:30"> </span><span data-wrapper="1"
+data-pos="3:30-3:35">elisp</span><span data-wrapper="1"
+data-pos="3:35-3:36">,</span><span data-wrapper="1"
+data-pos="3:36-3:37"> </span><span data-wrapper="1"
+data-pos="3:37-3:40">and</span><span data-wrapper="1"
+data-pos="3:40-3:41"> </span><span data-wrapper="1"
+data-pos="3:41-3:47">assets</span><span data-wrapper="1"
+data-pos="3:47-3:48"> </span><span data-wrapper="1"
+data-pos="3:48-3:49">—</span><span data-wrapper="1"
+data-pos="3:49-3:50"> </span><span data-wrapper="1"
+data-pos="3:50-3:54">kept</span><span data-wrapper="1"
+data-pos="3:54-3:55"> </span><span data-wrapper="1"
+data-pos="3:55-3:57">in</span><span data-wrapper="1"
+data-pos="3:57-3:58"> </span><span data-wrapper="1"
+data-pos="3:58-3:61">one</span><span data-wrapper="1"
+data-pos="3:61-3:62"> </span><span data-wrapper="1"
+data-pos="3:62-3:66">self</span><span data-wrapper="1"
+data-pos="3:66-3:67">-</span><span data-wrapper="1"
+data-pos="3:67-3:76">contained</span><span data-wrapper="1" data-pos="">
+</span><span data-wrapper="1" data-pos="4:1-4:4">git</span><span
+data-wrapper="1" data-pos="4:4-4:5"> </span><span data-wrapper="1"
+data-pos="4:5-4:9">repo</span><span data-wrapper="1"
+data-pos="4:9-4:10"> </span><span data-wrapper="1"
+data-pos="4:10-4:12">so</span><span data-wrapper="1"
+data-pos="4:12-4:13"> </span><span data-wrapper="1"
+data-pos="4:13-4:14">a</span><span data-wrapper="1"
+data-pos="4:14-4:15"> </span><span data-wrapper="1"
+data-pos="4:15-4:18">new</span><span data-wrapper="1"
+data-pos="4:18-4:19"> </span><span data-wrapper="1"
+data-pos="4:19-4:26">machine</span><span data-wrapper="1"
+data-pos="4:26-4:27"> </span><span data-wrapper="1"
+data-pos="4:27-4:29">is</span><span data-wrapper="1"
+data-pos="4:29-4:30"> </span><span data-wrapper="1"
+data-pos="4:30-4:33">one</span><span data-wrapper="1"
+data-pos="4:33-4:34"> </span><code
+data-pos="4:34-4:45">git clone</code><span data-wrapper="1"
+data-pos="4:45-4:46"> </span><span data-wrapper="1"
+data-pos="4:46-4:47">+</span><span data-wrapper="1"
+data-pos="4:47-4:48"> </span><span data-wrapper="1"
+data-pos="4:48-4:57">Spacemacs</span><span data-wrapper="1"
+data-pos="4:57-4:58"> </span><span data-wrapper="1"
+data-pos="4:58-4:65">install</span><span data-wrapper="1"
+data-pos="4:65-4:66"> </span><span data-wrapper="1"
+data-pos="4:66-4:70">away</span><span data-wrapper="1"
+data-pos="4:70-4:71"> </span><span data-wrapper="1"
+data-pos="4:71-4:75">from</span><span data-wrapper="1" data-pos="">
+</span><span data-wrapper="1" data-pos="5:1-5:3">my</span><span
+data-wrapper="1" data-pos="5:3-5:4"> </span><span data-wrapper="1"
+data-pos="5:4-5:8">full</span><span data-wrapper="1" data-pos="5:8-5:9">
+</span><span data-wrapper="1" data-pos="5:9-5:14">setup</span><span
+data-wrapper="1" data-pos="5:14-5:15">.</span></p>
+<h2 data-pos="7:1-8:1" id="layout"><span data-wrapper="1"
+data-pos="7:4-7:10">Layout</span></h2>
+<pre data-pos="9:1-18:1"><code>~/.spacemacs.d/
+├── init.el                          # the dotfile (layer list, init settings, themes)
+├── lisp/
+│   ├── user-init.el                 # body of dotspacemacs/user-init (PATH setup)
+│   └── user-config.el               # body of dotspacemacs/user-config (everything else)
+└── assets/
+    └── markdown-preview-header.html # mermaid + MathJax + CSS for the xwidget preview</code></pre>
+<p data-pos="19:1-23:1"><code data-pos="19:1-19:10">init.el</code><span
+data-wrapper="1" data-pos="19:10-19:11">'</span><span data-wrapper="1"
+data-pos="19:11-19:12">s</span><span data-wrapper="1"
+data-pos="19:12-19:13"> </span><code
+data-pos="19:13-19:37">dotspacemacs/user-init</code><span
+data-wrapper="1" data-pos="19:37-19:38"> </span><span data-wrapper="1"
+data-pos="19:38-19:41">and</span><span data-wrapper="1"
+data-pos="19:41-19:42"> </span><code
+data-pos="19:42-19:68">dotspacemacs/user-config</code><span
+data-wrapper="1" data-pos="19:68-19:69"> </span><span data-wrapper="1"
+data-pos="19:69-19:72">are</span><span data-wrapper="1" data-pos="">
+</span><span data-wrapper="1" data-pos="20:1-20:4">one</span><span
+data-wrapper="1" data-pos="20:4-20:5">-</span><span data-wrapper="1"
+data-pos="20:5-20:9">line</span><span data-wrapper="1"
+data-pos="20:9-20:10"> </span><span data-wrapper="1"
+data-pos="20:10-20:17">loaders</span><span data-wrapper="1"
+data-pos="20:17-20:18"> </span><span data-wrapper="1"
+data-pos="20:18-20:22">that</span><span data-wrapper="1"
+data-pos="20:22-20:23"> </span><code
+data-pos="20:23-20:35">(load ...)</code><span data-wrapper="1"
+data-pos="20:35-20:36"> </span><span data-wrapper="1"
+data-pos="20:36-20:39">the</span><span data-wrapper="1"
+data-pos="20:39-20:40"> </span><span data-wrapper="1"
+data-pos="20:40-20:48">matching</span><span data-wrapper="1"
+data-pos="20:48-20:49"> </span><span data-wrapper="1"
+data-pos="20:49-20:54">files</span><span data-wrapper="1"
+data-pos="20:54-20:55"> </span><span data-wrapper="1"
+data-pos="20:55-20:60">under</span><span data-wrapper="1"
+data-pos="20:60-20:61"> </span><code
+data-pos="20:61-20:68">lisp/</code><span data-wrapper="1"
+data-pos="20:68-20:69">.</span><span data-wrapper="1"
+data-pos="20:69-20:70"> </span><span data-wrapper="1"
+data-pos="20:70-20:74">Edit</span><span data-wrapper="1" data-pos="">
+</span><span data-wrapper="1" data-pos="21:1-21:4">the</span><span
+data-wrapper="1" data-pos="21:4-21:5"> </span><span data-wrapper="1"
+data-pos="21:5-21:11">helper</span><span data-wrapper="1"
+data-pos="21:11-21:12"> </span><span data-wrapper="1"
+data-pos="21:12-21:17">files</span><span data-wrapper="1"
+data-pos="21:17-21:18"> </span><span data-wrapper="1"
+data-pos="21:18-21:26">directly</span><span data-wrapper="1"
+data-pos="21:26-21:27"> </span><span data-wrapper="1"
+data-pos="21:27-21:28">—</span><span data-wrapper="1"
+data-pos="21:28-21:29"> </span><span data-wrapper="1"
+data-pos="21:29-21:32">the</span><span data-wrapper="1"
+data-pos="21:32-21:33"> </span><span data-wrapper="1"
+data-pos="21:33-21:40">dotfile</span><span data-wrapper="1"
+data-pos="21:40-21:41"> </span><span data-wrapper="1"
+data-pos="21:41-21:45">only</span><span data-wrapper="1"
+data-pos="21:45-21:46"> </span><span data-wrapper="1"
+data-pos="21:46-21:51">needs</span><span data-wrapper="1"
+data-pos="21:51-21:52"> </span><span data-wrapper="1"
+data-pos="21:52-21:54">to</span><span data-wrapper="1"
+data-pos="21:54-21:55"> </span><span data-wrapper="1"
+data-pos="21:55-21:61">change</span><span data-wrapper="1"
+data-pos="21:61-21:62"> </span><span data-wrapper="1"
+data-pos="21:62-21:65">for</span><span data-wrapper="1"
+data-pos="21:65-21:66"> </span><span data-wrapper="1"
+data-pos="21:66-21:71">layer</span><span data-wrapper="1"
+data-pos="21:71-21:72"> </span><span data-wrapper="1"
+data-pos="21:72-21:74">or</span><span data-wrapper="1" data-pos="">
+</span><span data-wrapper="1" data-pos="22:1-22:5">init</span><span
+data-wrapper="1" data-pos="22:5-22:6">-</span><span data-wrapper="1"
+data-pos="22:6-22:13">setting</span><span data-wrapper="1"
+data-pos="22:13-22:14"> </span><span data-wrapper="1"
+data-pos="22:14-22:21">changes</span><span data-wrapper="1"
+data-pos="22:21-22:22">.</span></p>
+<h2 data-pos="24:1-25:1" id="bootstrap-on-a-new-machine"><span
+data-wrapper="1" data-pos="24:4-24:13">Bootstrap</span><span
+data-wrapper="1" data-pos="24:13-24:14"> </span><span data-wrapper="1"
+data-pos="24:14-24:16">on</span><span data-wrapper="1"
+data-pos="24:16-24:17"> </span><span data-wrapper="1"
+data-pos="24:17-24:18">a</span><span data-wrapper="1"
+data-pos="24:18-24:19"> </span><span data-wrapper="1"
+data-pos="24:19-24:22">new</span><span data-wrapper="1"
+data-pos="24:22-24:23"> </span><span data-wrapper="1"
+data-pos="24:23-24:30">machine</span></h2>
+<div class="sourceCode" id="cb2" data-pos="26:1-42:1"><pre
+class="sourceCode sh"><code class="sourceCode bash"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="co"># 1. Install Emacs (macOS example)</span></span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a><span class="ex">brew</span> install <span class="at">--cask</span> emacs</span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a><span class="co"># 2. Install Spacemacs into the canonical location</span></span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a><span class="fu">git</span> clone https://github.com/syl20bnr/spacemacs ~/.emacs.d</span>
+<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-7"><a href="#cb2-7" aria-hidden="true" tabindex="-1"></a><span class="co"># 3. Clone this repo into ~/.spacemacs.d/</span></span>
+<span id="cb2-8"><a href="#cb2-8" aria-hidden="true" tabindex="-1"></a><span class="fu">git</span> clone <span class="op">&lt;</span>this-repo-url<span class="op">&gt;</span> ~/.spacemacs.d</span>
+<span id="cb2-9"><a href="#cb2-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-10"><a href="#cb2-10" aria-hidden="true" tabindex="-1"></a><span class="co"># 4. Make sure no stale ~/.spacemacs is in the way</span></span>
+<span id="cb2-11"><a href="#cb2-11" aria-hidden="true" tabindex="-1"></a><span class="bu">[</span> <span class="ot">-e</span> ~/.spacemacs <span class="bu">]</span> <span class="kw">&amp;&amp;</span> <span class="fu">mv</span> ~/.spacemacs ~/.spacemacs.bak</span>
+<span id="cb2-12"><a href="#cb2-12" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-13"><a href="#cb2-13" aria-hidden="true" tabindex="-1"></a><span class="co"># 5. Launch Emacs — Spacemacs will install all packages declared in init.el</span></span>
+<span id="cb2-14"><a href="#cb2-14" aria-hidden="true" tabindex="-1"></a><span class="ex">emacs</span></span></code></pre></div>
+<p data-pos="43:1-44:1"><span data-wrapper="1"
+data-pos="43:1-43:9">External</span><span data-wrapper="1"
+data-pos="43:9-43:10"> </span><span data-wrapper="1"
+data-pos="43:10-43:17">tooling</span><span data-wrapper="1"
+data-pos="43:17-43:18"> </span><span data-wrapper="1"
+data-pos="43:18-43:22">that</span><span data-wrapper="1"
+data-pos="43:22-43:23"> </span><span data-wrapper="1"
+data-pos="43:23-43:26">the</span><span data-wrapper="1"
+data-pos="43:26-43:27"> </span><span data-wrapper="1"
+data-pos="43:27-43:41">customizations</span><span data-wrapper="1"
+data-pos="43:41-43:42"> </span><span data-wrapper="1"
+data-pos="43:42-43:48">expect</span><span data-wrapper="1"
+data-pos="43:48-43:49"> </span><span data-wrapper="1"
+data-pos="43:49-43:51">to</span><span data-wrapper="1"
+data-pos="43:51-43:52"> </span><span data-wrapper="1"
+data-pos="43:52-43:56">find</span><span data-wrapper="1"
+data-pos="43:56-43:57"> </span><span data-wrapper="1"
+data-pos="43:57-43:59">on</span><span data-wrapper="1"
+data-pos="43:59-43:60"> </span><code
+data-pos="43:60-43:66">PATH</code><span data-wrapper="1"
+data-pos="43:66-43:67">:</span></p>
+<ul data-pos="45:1-52:1">
+<li><code data-pos="45:3-45:7" data-pos="45:3-46:1">rg</code><span
+data-wrapper="1" data-pos="45:7-45:8" data-pos="45:3-46:1"> </span><span
+data-wrapper="1" data-pos="45:8-45:9" data-pos="45:3-46:1">(</span><span
+data-wrapper="1" data-pos="45:9-45:16"
+data-pos="45:3-46:1">ripgrep</span><span data-wrapper="1"
+data-pos="45:16-45:17" data-pos="45:3-46:1">)</span><span
+data-wrapper="1" data-pos="45:17-45:18" data-pos="45:3-46:1">
+</span><span data-wrapper="1" data-pos="45:18-45:19"
+data-pos="45:3-46:1">—</span><span data-wrapper="1"
+data-pos="45:19-45:20" data-pos="45:3-46:1"> </span><span
+data-wrapper="1" data-pos="45:20-45:24"
+data-pos="45:3-46:1">used</span><span data-wrapper="1"
+data-pos="45:24-45:25" data-pos="45:3-46:1"> </span><span
+data-wrapper="1" data-pos="45:25-45:27"
+data-pos="45:3-46:1">by</span><span data-wrapper="1"
+data-pos="45:27-45:28" data-pos="45:3-46:1"> </span><span
+data-wrapper="1" data-pos="45:28-45:32"
+data-pos="45:3-46:1">helm</span><span data-wrapper="1"
+data-pos="45:32-45:33" data-pos="45:3-46:1">-</span><span
+data-wrapper="1" data-pos="45:33-45:37"
+data-pos="45:3-46:1">grep</span></li>
+<li><code data-pos="46:3-46:11" data-pos="46:3-47:1">pandoc</code><span
+data-wrapper="1" data-pos="46:11-46:12" data-pos="46:3-47:1">
+</span><span data-wrapper="1" data-pos="46:12-46:13"
+data-pos="46:3-47:1">—</span><span data-wrapper="1"
+data-pos="46:13-46:14" data-pos="46:3-47:1"> </span><span
+data-wrapper="1" data-pos="46:14-46:22"
+data-pos="46:3-47:1">markdown</span><span data-wrapper="1"
+data-pos="46:22-46:23" data-pos="46:3-47:1"> </span><span
+data-wrapper="1" data-pos="46:23-46:27"
+data-pos="46:3-47:1">live</span><span data-wrapper="1"
+data-pos="46:27-46:28" data-pos="46:3-47:1"> </span><span
+data-wrapper="1" data-pos="46:28-46:35"
+data-pos="46:3-47:1">preview</span></li>
+<li><code data-pos="47:3-47:13"
+data-pos="47:3-48:1">plantuml</code><span data-wrapper="1"
+data-pos="47:13-47:14" data-pos="47:3-48:1"> </span><span
+data-wrapper="1" data-pos="47:14-47:15"
+data-pos="47:3-48:1">(</span><span data-wrapper="1"
+data-pos="47:15-47:23" data-pos="47:3-48:1">provides</span><span
+data-wrapper="1" data-pos="47:23-47:24" data-pos="47:3-48:1">
+</span><code data-pos="47:24-47:38"
+data-pos="47:3-48:1">plantuml.jar</code><span data-wrapper="1"
+data-pos="47:38-47:39" data-pos="47:3-48:1">)</span><span
+data-wrapper="1" data-pos="47:39-47:40" data-pos="47:3-48:1">
+</span><span data-wrapper="1" data-pos="47:40-47:41"
+data-pos="47:3-48:1">—</span><span data-wrapper="1"
+data-pos="47:41-47:42" data-pos="47:3-48:1"> </span><span
+data-wrapper="1" data-pos="47:42-47:45"
+data-pos="47:3-48:1">org</span><span data-wrapper="1"
+data-pos="47:45-47:46" data-pos="47:3-48:1">-</span><span
+data-wrapper="1" data-pos="47:46-47:51"
+data-pos="47:3-48:1">babel</span><span data-wrapper="1"
+data-pos="47:51-47:52" data-pos="47:3-48:1"> </span><span
+data-wrapper="1" data-pos="47:52-47:60"
+data-pos="47:3-48:1">PlantUML</span><span data-wrapper="1"
+data-pos="47:60-47:61" data-pos="47:3-48:1"> </span><span
+data-wrapper="1" data-pos="47:61-47:67"
+data-pos="47:3-48:1">blocks</span></li>
+<li><span data-wrapper="1" data-pos="48:3-48:11"
+data-pos="48:3-49:1;49:3-50:1">Homebrew</span><span data-wrapper="1"
+data-pos="48:11-48:12" data-pos="48:3-49:1;49:3-50:1"> </span><span
+data-wrapper="1" data-pos="48:12-48:14"
+data-pos="48:3-49:1;49:3-50:1">at</span><span data-wrapper="1"
+data-pos="48:14-48:15" data-pos="48:3-49:1;49:3-50:1"> </span><code
+data-pos="48:15-48:30"
+data-pos="48:3-49:1;49:3-50:1">/opt/homebrew</code><span
+data-wrapper="1" data-pos="48:30-48:31" data-pos="48:3-49:1;49:3-50:1">
+</span><span data-wrapper="1" data-pos="48:31-48:32"
+data-pos="48:3-49:1;49:3-50:1">(</span><span data-wrapper="1"
+data-pos="48:32-48:37" data-pos="48:3-49:1;49:3-50:1">Apple</span><span
+data-wrapper="1" data-pos="48:37-48:38" data-pos="48:3-49:1;49:3-50:1">
+</span><span data-wrapper="1" data-pos="48:38-48:45"
+data-pos="48:3-49:1;49:3-50:1">Silicon</span><span data-wrapper="1"
+data-pos="48:45-48:46" data-pos="48:3-49:1;49:3-50:1">)</span><span
+data-wrapper="1" data-pos="48:46-48:47" data-pos="48:3-49:1;49:3-50:1">
+</span><span data-wrapper="1" data-pos="48:47-48:48"
+data-pos="48:3-49:1;49:3-50:1">—</span><span data-wrapper="1"
+data-pos="48:48-48:49" data-pos="48:3-49:1;49:3-50:1"> </span><code
+data-pos="48:49-48:68"
+data-pos="48:3-49:1;49:3-50:1">lisp/user-init.el</code><span
+data-wrapper="1" data-pos="48:68-48:69" data-pos="48:3-49:1;49:3-50:1">
+</span><span data-wrapper="1" data-pos="48:69-48:73"
+data-pos="48:3-49:1;49:3-50:1">adds</span><span data-wrapper="1"
+data-pos="48:73-48:74" data-pos="48:3-49:1;49:3-50:1"> </span><span
+data-wrapper="1" data-pos="48:74-48:77"
+data-pos="48:3-49:1;49:3-50:1">the</span><span data-wrapper="1"
+data-pos="" data-pos="48:3-49:1;49:3-50:1"> </span><span
+data-wrapper="1" data-pos="49:3-49:11"
+data-pos="48:3-49:1;49:3-50:1">Homebrew</span><span data-wrapper="1"
+data-pos="49:11-49:12" data-pos="48:3-49:1;49:3-50:1"> </span><span
+data-wrapper="1" data-pos="49:12-49:15"
+data-pos="48:3-49:1;49:3-50:1">bin</span><span data-wrapper="1"
+data-pos="49:15-49:16" data-pos="48:3-49:1;49:3-50:1"> </span><span
+data-wrapper="1" data-pos="49:16-49:20"
+data-pos="48:3-49:1;49:3-50:1">dirs</span><span data-wrapper="1"
+data-pos="49:20-49:21" data-pos="48:3-49:1;49:3-50:1"> </span><span
+data-wrapper="1" data-pos="49:21-49:23"
+data-pos="48:3-49:1;49:3-50:1">to</span><span data-wrapper="1"
+data-pos="49:23-49:24" data-pos="48:3-49:1;49:3-50:1"> </span><code
+data-pos="49:24-49:35"
+data-pos="48:3-49:1;49:3-50:1">exec-path</code></li>
+</ul>
+<p data-pos="51:1-52:1"><span data-wrapper="1"
+data-pos="51:1-51:3">On</span><span data-wrapper="1"
+data-pos="51:3-51:4"> </span><span data-wrapper="1"
+data-pos="51:4-51:9">macOS</span><span data-wrapper="1"
+data-pos="51:9-51:10">:</span></p>
+<div class="sourceCode" id="cb3" data-pos="53:1-56:1"><pre
+class="sourceCode sh"><code class="sourceCode bash"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="ex">brew</span> install ripgrep pandoc plantuml</span></code></pre></div>
+</body>
+</html>
