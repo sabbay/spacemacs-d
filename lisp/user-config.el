@@ -331,5 +331,85 @@ Navigates the shared xwidget-webkit session to FILE and wires
   (when (boundp 'ns-system-appearance)
     (my/apply-theme-for-appearance ns-system-appearance)))
 
+;; ----- Forge: SPC g h prefix for GitHub PR/issue browsing -----
+;; Register unconditionally — forge commands are autoloaded, so invoking
+;; one triggers forge to load. Gating on `with-eval-after-load 'forge'
+;; would create a chicken-and-egg: the bindings would never appear until
+;; forge was already loaded some other way.
+(spacemacs/declare-prefix "gh" "github/forge")
+(spacemacs/set-leader-keys
+  "ghp" 'forge-list-pullreqs
+  "ghi" 'forge-list-issues
+  "ghf" 'forge-pull
+  "ghv" 'forge-visit-pullreq
+  "gha" 'forge-add-repository)
+
+;; ----- which-key: pop up faster after any prefix key -----
+;; Default Spacemacs delay is 0.4s. Dropping to 0.2s makes it feel like a
+;; persistent cheat sheet. The secondary delay (for follow-up prefixes after
+;; the first popup) is 0 so drilling into nested menus is instant.
+(with-eval-after-load 'which-key
+  (setq which-key-idle-delay 0.2
+        which-key-idle-secondary-delay 0.0
+        which-key-max-description-length 40
+        which-key-show-early-on-C-h t))
+
+;; ----- Persistent magit cheat sheet in a bottom side window -----
+;; which-key only shows after you start a prefix. This panel is always
+;; visible whenever any magit/forge buffer is on screen, so there's a
+;; stable reference for the most common keys without triggering a menu.
+
+(defconst my/magit-cheatsheet-buffer-name " *magit-cheatsheet*")
+
+(defconst my/magit-cheatsheet-text
+  "\
+Navigate          Stage/Commit       Remote            Branches & Logs    Forge (PRs/Issues)
+ n  p  next/prev    s  stage            F  pull menu       b  branch menu     @          forge menu
+ M-n M-p sibling    u  unstage          P  push menu       l  log menu        SPC g h p  list PRs
+ TAB  fold          S  stage all        f  fetch menu      L  refs log        SPC g h i  list issues
+ 1..4  level        U  unstage all      r  rebase menu     o  other menu      SPC g h f  forge-pull
+ RET  visit         c  commit menu      m  merge menu      V  revert menu     (on PR) RET open
+ g    refresh       k  discard          x  reset menu      z  stash menu      ,C  checkout PR
+ ?    dispatch      e    diff menu      Y  cherry-pick     t  tag menu        ,s  set state
+ q    quit/bury     w    apply patch    !    git shell     T  topic menu      ,r  review request")
+
+(defun my/magit-cheatsheet--get-buffer ()
+  (or (get-buffer my/magit-cheatsheet-buffer-name)
+      (with-current-buffer (get-buffer-create my/magit-cheatsheet-buffer-name)
+        (let ((inhibit-read-only t))
+          (erase-buffer)
+          (insert my/magit-cheatsheet-text))
+        (setq-local mode-line-format nil
+                    cursor-type nil
+                    buffer-read-only t
+                    truncate-lines t)
+        (current-buffer))))
+
+(defun my/magit-cheatsheet--in-magit-p ()
+  "Non-nil when the selected window's buffer is a magit/forge mode."
+  (with-current-buffer (window-buffer (selected-window))
+    (derived-mode-p 'magit-mode 'forge-topic-mode 'forge-post-mode)))
+
+(defun my/magit-cheatsheet--sync (&rest _)
+  "Show cheat sheet iff the currently-focused buffer is a magit/forge one."
+  (let ((visible (get-buffer-window my/magit-cheatsheet-buffer-name))
+        (wanted (my/magit-cheatsheet--in-magit-p)))
+    (cond
+     ((and wanted (not visible))
+      (display-buffer-in-side-window
+       (my/magit-cheatsheet--get-buffer)
+       '((side . bottom)
+         (slot . 1)
+         (window-height . 11)
+         (preserve-size . (nil . t))
+         (no-other-window . t)
+         (no-delete-other-windows . t))))
+     ((and (not wanted) visible)
+      (delete-window visible)))))
+
+(add-hook 'window-configuration-change-hook #'my/magit-cheatsheet--sync)
+(add-hook 'window-buffer-change-functions
+          (lambda (_frame) (my/magit-cheatsheet--sync)))
+
 (provide 'user-config)
 ;;; user-config.el ends here
