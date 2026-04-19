@@ -1,0 +1,10 @@
+# Byte-compiled emacs lisp
+*.elc
+
+# Backup / autosave / lock files
+*~
+\#*\#
+.\#*
+
+# Spacemacs machine-specific environment cache
+.spacemacs.env

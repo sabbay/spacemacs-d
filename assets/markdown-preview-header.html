@@ -1,0 +1,231 @@
+<meta charset="utf-8">
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>
+  window.addEventListener('DOMContentLoaded', function () {
+    // Pandoc (gfm+sourcepos -> html5) emits fenced mermaid as
+    //   <pre class="mermaid"><code>...</code></pre>
+    // with the content HTML-entity-encoded (&quot; &lt; --&gt; etc.).
+    // If we leave that shape alone, mermaid's startOnLoad picks up the
+    // <pre class="mermaid"> and tries to parse the nested <code> tags
+    // as diagram source — Syntax error in text.
+    //
+    // Fix: peel off the <code> wrapper and replace with <div class="mermaid">
+    // whose textContent is the plain decoded diagram source. Handle both the
+    // pandoc shape and the GFM alt shape (<pre><code class="language-mermaid">).
+    var selectors = [
+      'pre.mermaid',
+      'pre.language-mermaid',
+      'pre > code.language-mermaid',
+      'pre > code.mermaid'
+    ];
+    document.querySelectorAll(selectors.join(',')).forEach(function (el) {
+      var pre = el.tagName === 'PRE' ? el : el.parentElement;
+      if (!pre || pre.dataset.mermaidConverted === '1') return;
+      var div = document.createElement('div');
+      div.className = 'mermaid';
+      div.textContent = pre.textContent;
+      pre.dataset.mermaidConverted = '1';
+      pre.parentNode.replaceChild(div, pre);
+    });
+    var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    mermaid.initialize({ startOnLoad: false, theme: dark ? 'dark' : 'default', securityLevel: 'loose' });
+    mermaid.run().then(setupLightbox).catch(setupLightbox);
+  });
+
+  // ---- lightbox: click a mermaid SVG or image to enlarge ----
+  // Esc / backdrop click / × to close, wheel to zoom, drag to pan, 0 to reset.
+  function setupLightbox() {
+    if (document.getElementById('md-lightbox')) { wireZoomable(); return; }
+    var box = document.createElement('div');
+    box.id = 'md-lightbox';
+    box.innerHTML =
+      '<div class="md-lb-inner"></div>' +
+      '<button class="md-lb-close" aria-label="Close">×</button>' +
+      '<div class="md-lb-hint">click backdrop or Esc to close · wheel to zoom · drag to pan · 0 to reset</div>';
+    document.body.appendChild(box);
+    var inner = box.querySelector('.md-lb-inner');
+    var state = { scale: 1, x: 0, y: 0, dragging: false, sx: 0, sy: 0 };
+    function apply() {
+      inner.style.transform = 'translate(' + state.x + 'px,' + state.y + 'px) scale(' + state.scale + ')';
+    }
+    function reset() { state.scale = 1; state.x = 0; state.y = 0; apply(); }
+    function close() { box.classList.remove('open'); inner.innerHTML = ''; reset(); }
+    function open(el) {
+      var clone = el.cloneNode(true);
+      clone.removeAttribute('style');
+      if (clone.tagName && clone.tagName.toLowerCase() === 'svg') {
+        clone.removeAttribute('width');
+        clone.removeAttribute('height');
+        clone.style.width = '90vw';
+        clone.style.height = '85vh';
+      }
+      inner.innerHTML = '';
+      inner.appendChild(clone);
+      reset();
+      box.classList.add('open');
+    }
+    box.addEventListener('click', function (e) { if (e.target === box) close(); });
+    box.querySelector('.md-lb-close').addEventListener('click', close);
+    document.addEventListener('keydown', function (e) {
+      if (!box.classList.contains('open')) return;
+      if (e.key === 'Escape') close();
+      else if (e.key === '+' || e.key === '=') { state.scale = Math.min(8, state.scale * 1.2); apply(); }
+      else if (e.key === '-') { state.scale = Math.max(0.2, state.scale / 1.2); apply(); }
+      else if (e.key === '0') reset();
+    });
+    box.addEventListener('wheel', function (e) {
+      if (!box.classList.contains('open')) return;
+      e.preventDefault();
+      var d = e.deltaY < 0 ? 1.1 : 0.9;
+      state.scale = Math.max(0.2, Math.min(8, state.scale * d));
+      apply();
+    }, { passive: false });
+    inner.addEventListener('mousedown', function (e) {
+      state.dragging = true;
+      state.sx = e.clientX - state.x;
+      state.sy = e.clientY - state.y;
+      inner.style.cursor = 'grabbing';
+      e.preventDefault();
+    });
+    window.addEventListener('mousemove', function (e) {
+      if (!state.dragging) return;
+      state.x = e.clientX - state.sx;
+      state.y = e.clientY - state.sy;
+      apply();
+    });
+    window.addEventListener('mouseup', function () {
+      if (!state.dragging) return;
+      state.dragging = false;
+      inner.style.cursor = '';
+    });
+    window.__mdLightbox = { open: open, close: close };
+    wireZoomable();
+  }
+  function wireZoomable() {
+    var targets = document.querySelectorAll('div.mermaid svg, img');
+    targets.forEach(function (el) {
+      if (el.dataset.zoomable === '1') return;
+      el.dataset.zoomable = '1';
+      el.style.cursor = 'zoom-in';
+      el.addEventListener('click', function (e) {
+        if (!window.__mdLightbox) return;
+        e.preventDefault();
+        window.__mdLightbox.open(el);
+      });
+    });
+  }
+
+  // ---- cursor sync: called from Emacs via xwidget-webkit-execute-script ----
+  window.__mdHighlighted = null;
+  window.scrollToLine = function (line) {
+    var nodes = document.querySelectorAll('[data-pos]');
+    // Pick the innermost (smallest source-range) element containing LINE.
+    // Falls back to the nearest element before/after if none contains it.
+    var target = null, tStart = 0, tEnd = 0, tSpan = Infinity;
+    var before = null, bEnd = -1;
+    var after = null, aStart = Infinity;
+    for (var i = 0; i < nodes.length; i++) {
+      var m = nodes[i].getAttribute('data-pos').match(/@?(\d+):\d+-(\d+):\d+/);
+      if (!m) continue;
+      var s = parseInt(m[1], 10), e = parseInt(m[2], 10), span = e - s;
+      if (line >= s && line <= e) {
+        if (span < tSpan) { target = nodes[i]; tStart = s; tEnd = e; tSpan = span; }
+      } else if (e < line && e > bEnd) { before = nodes[i]; bEnd = e; }
+      else if (s > line && s < aStart) { after = nodes[i]; aStart = s; }
+    }
+    if (!target) {
+      target = before || after;
+      if (!target) return;
+      var mm = target.getAttribute('data-pos').match(/@?(\d+):\d+-(\d+):\d+/);
+      tStart = parseInt(mm[1], 10); tEnd = parseInt(mm[2], 10);
+    }
+    // Proportional scroll: map the cursor's position within the source range
+    // to the same fractional position within the rendered element's height.
+    var rect = target.getBoundingClientRect();
+    var absTop = rect.top + window.scrollY;
+    var span = Math.max(0, tEnd - tStart);
+    var frac = span > 0 ? Math.max(0, Math.min(1, (line - tStart) / span)) : 0;
+    var desiredTop = absTop + frac * rect.height - window.innerHeight / 2;
+    window.scrollTo({ top: Math.max(0, desiredTop), behavior: 'smooth' });
+    // Only flash highlight on element change, not on every intra-block move.
+    if (target !== window.__mdHighlighted) {
+      if (window.__mdHighlighted) {
+        window.__mdHighlighted.style.backgroundColor = '';
+        window.__mdHighlighted.style.transition = '';
+      }
+      target.style.transition = 'background-color .3s';
+      target.style.backgroundColor = 'rgba(255, 235, 59, .35)';
+      window.__mdHighlighted = target;
+      clearTimeout(window.__mdHighlightTimer);
+      window.__mdHighlightTimer = setTimeout(function () {
+        if (window.__mdHighlighted) window.__mdHighlighted.style.backgroundColor = '';
+        window.__mdHighlighted = null;
+      }, 1200);
+    }
+  };
+</script>
+<style>
+  body { max-width: 860px; margin: 2em auto; padding: 0 2em;
+         font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif;
+         line-height: 1.6; color: #24292f; }
+  h1, h2, h3, h4 { line-height: 1.25; }
+  h1, h2 { border-bottom: 1px solid #eaecef; padding-bottom: .3em; }
+  pre { background: #f6f8fa; padding: 1em; border-radius: 6px; overflow-x: auto; }
+  code { font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 85%; }
+  :not(pre) > code { background: rgba(175,184,193,.2); padding: .2em .4em; border-radius: 6px; }
+  pre code { background: none; padding: 0; font-size: 100%; }
+  blockquote { border-left: 4px solid #d0d7de; margin: 0; padding: 0 1em; color: #57606a; }
+  table { border-collapse: collapse; }
+  table th, table td { border: 1px solid #d0d7de; padding: 6px 13px; }
+  table tr:nth-child(2n) { background: #f6f8fa; }
+  img { max-width: 100%; }
+  a { color: #0969da; }
+  .mermaid { text-align: center; }
+  /* ---- lightbox ---- */
+  #md-lightbox {
+    position: fixed; inset: 0; z-index: 9999;
+    background: rgba(0,0,0,0.88);
+    display: none; align-items: center; justify-content: center;
+    overflow: hidden; user-select: none;
+  }
+  #md-lightbox.open { display: flex; }
+  #md-lightbox .md-lb-inner {
+    transform-origin: center center;
+    transition: transform 40ms linear;
+    cursor: grab;
+    max-width: 96vw; max-height: 92vh;
+    background: #fff; border-radius: 10px; padding: 1em;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+    display: flex; align-items: center; justify-content: center;
+  }
+  #md-lightbox .md-lb-inner > svg,
+  #md-lightbox .md-lb-inner > img {
+    width: auto; height: auto;
+    max-width: 90vw; max-height: 85vh;
+    display: block; pointer-events: none;
+  }
+  #md-lightbox .md-lb-close {
+    position: absolute; top: 1em; right: 1em;
+    background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.4);
+    color: #fff; font-size: 1.5em; line-height: 1;
+    width: 2em; height: 2em; border-radius: 50%; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #md-lightbox .md-lb-close:hover { background: rgba(255,255,255,0.2); }
+  #md-lightbox .md-lb-hint {
+    position: absolute; bottom: 1em; left: 0; right: 0;
+    text-align: center; color: #bbb; font-size: 0.8em;
+    pointer-events: none;
+  }
+  @media (prefers-color-scheme: dark) {
+    body { background: #0d1117; color: #c9d1d9; }
+    h1, h2 { border-bottom-color: #21262d; }
+    pre { background: #161b22; }
+    :not(pre) > code { background: rgba(110,118,129,.4); }
+    blockquote { border-left-color: #30363d; color: #8b949e; }
+    table th, table td { border-color: #30363d; }
+    table tr:nth-child(2n) { background: #161b22; }
+    a { color: #58a6ff; }
+    #md-lightbox .md-lb-inner { background: #1c1f24; }
+  }
+</style>
