@@ -565,5 +565,19 @@ Navigate          Stage/Commit       Remote            Branches & Logs    Forge 
 (add-hook 'window-buffer-change-functions
           (lambda (_frame) (my/magit-cheatsheet--sync)))
 
+;; emacs-mcp-server: lets Claude Code edit live Emacs buffers via Unix socket.
+;; Called directly here because Spacemacs loads user-config.el after
+;; emacs-startup-hook has already fired. Standalone Emacs refuses to bind if
+;; the daemon already owns the socket (conflict-resolution = error).
+(add-to-list 'load-path (expand-file-name "~/Development/emacs-mcp-server"))
+(require 'mcp-server)
+(setq mcp-server-socket-conflict-resolution 'error)
+;; Allow buffer-editing primitives so Claude can edit live buffers without disk races.
+(setq mcp-server-security-allowed-dangerous-functions
+      '(with-current-buffer save-buffer insert goto-char))
+(condition-case err
+    (mcp-server-start-unix)
+  (error (message "mcp-server: not started (%s)" err)))
+
 (provide 'user-config)
 ;;; user-config.el ends here
