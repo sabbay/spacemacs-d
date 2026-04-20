@@ -87,13 +87,13 @@
            ;;    lands within the link syntax).
            (let ((ctx (org-element-context)))
              (and (eq (org-element-type ctx) 'link)
-                  (string-equal "file" (org-element-property :type ctx))
+                  (member (org-element-property :type ctx) '("file" "excalidraw"))
                   (org-element-property :path ctx)))
            ;; 2. Fallback: scan the current line for [[file:...]]
            (save-excursion
              (beginning-of-line)
              (when (re-search-forward
-                    "\\[\\[file:\\([^]\n]+\\)\\]"
+                    "\\[\\[\\(?:file\\|excalidraw\\):\\([^]\n]+\\)\\]"
                     (line-end-position) t)
                (match-string-no-properties 1)))))
          (abs (when path
@@ -171,7 +171,7 @@ babel source blocks."
 externally. Return non-nil when we handled the link."
   (let ((ctx (org-element-context)))
     (when (and (eq (org-element-type ctx) 'link)
-               (string-equal "file" (org-element-property :type ctx)))
+               (member (org-element-property :type ctx) '("file" "excalidraw")))
       (let* ((path (org-element-property :path ctx))
              (abs (when path
                     (expand-file-name
@@ -330,6 +330,160 @@ Navigates the shared xwidget-webkit session to FILE and wires
   ;; Apply the correct theme at startup based on current appearance
   (when (boundp 'ns-system-appearance)
     (my/apply-theme-for-appearance ns-system-appearance)))
+
+;; ----- org-excalidraw: insert + edit Excalidraw diagrams in Org files -----
+;; `M-x org-excalidraw-create-drawing' inserts a link to a new .excalidraw
+;; file under `org-excalidraw-directory' and opens it in the browser
+;; (excalidraw.com). Saving the file in-browser writes back to disk; the
+;; package then shells out to `excalidraw_export' to render an SVG that Org
+;; displays inline.
+;;
+;; Requires the CLI:  npm install -g excalidraw_export
+;; (Timmmm/excalidraw_export — provides the `excalidraw_export' binary).
+(use-package org-excalidraw
+  :after org
+  :demand t
+  :init
+  (setq org-excalidraw-directory (expand-file-name "~/org/excalidraw"))
+  :config
+  (unless (file-directory-p org-excalidraw-directory)
+    (make-directory org-excalidraw-directory t))
+  ;; Starts the filenotify watcher on `org-excalidraw-directory'. Without
+  ;; this, saves in the Excalidraw editor never trigger SVG generation
+  ;; and the inline image stays stale/broken.
+  (org-excalidraw-initialize)
+  ;; Org 9.8 replaced `:image-data-fun' with `:preview' for inline display.
+  ;; The package only registers the old parameter, so previews never render.
+  ;; Custom previewer caps height (Org's `org-image-actual-width' caps width
+  ;; only — tall/narrow Excalidraw drawings would otherwise dominate the buffer).
+  (defvar my/excalidraw-preview-max-height 300
+    "Max pixel height for inline Excalidraw previews. Width scales proportionally.")
+  (defun my/excalidraw-preview (ov path _link)
+    (when (display-graphic-p)
+      (require 'image)
+      (when (file-exists-p path)
+        (let ((image (create-image path nil nil
+                                   :max-height my/excalidraw-preview-max-height
+                                   :ascent 'center)))
+          (image-flush image)
+          (overlay-put ov 'display image)
+          (overlay-put ov 'face 'default)
+          (overlay-put ov 'keymap image-map)
+          t))))
+  (org-link-set-parameters "excalidraw" :preview #'my/excalidraw-preview)
+  ;; The upstream handler writes the SVG but never refreshes Org buffers,
+  ;; so the inline preview stays stale until you toggle images manually.
+  (defun my/org-excalidraw-refresh-after-export (event)
+    (when (and (string-equal (cadr event) "renamed")
+               (string-suffix-p ".excalidraw" (cadddr event)))
+      (run-at-time
+       0.1 nil
+       (lambda ()
+         (clear-image-cache (concat (cadddr event) ".svg"))
+         (dolist (buf (buffer-list))
+           (with-current-buffer buf
+             (when (derived-mode-p 'org-mode)
+               (org-link-preview nil (point-min) (point-max)))))))))
+  (advice-add 'org-excalidraw--handle-file-change
+              :after #'my/org-excalidraw-refresh-after-export))
+;; The package shells `open <file>' on macOS, which uses the OS file
+;; association. Set Excalidraw (installed as a Chrome PWA from
+;; https://excalidraw.com) as the default app for .excalidraw files via
+;; Finder → Get Info → Open With → Change All. The PWA's file_handlers
+;; manifest auto-loads the file when launched.
+
+(with-eval-after-load 'org
+  (when (fboundp 'spacemacs/set-leader-keys-for-major-mode)
+    (spacemacs/set-leader-keys-for-major-mode
+      'org-mode
+      "ix" #'org-excalidraw-create-drawing
+      "id" #'my/org-excalidraw-describe-all
+      ;; Toggle link previews (inline images) in current section.
+      "Ti" #'org-link-preview
+      "TI" #'my/org-toggle-buffer-link-previews)))
+
+(defun my/org-toggle-buffer-link-previews ()
+  "Toggle inline link previews for the whole buffer."
+  (interactive)
+  (if org-link-preview-overlays
+      (org-link-preview-clear (point-min) (point-max))
+    (org-link-preview nil (point-min) (point-max))))
+
+;; ----- Auto-describe Excalidraw drawings via `claude -p' ----------------
+;; `M-x my/org-excalidraw-describe-all' (or SPC m i d in org-mode) walks
+;; every excalidraw: link in the buffer, asks Claude to describe each
+;; drawing asynchronously, and inserts a `#+caption:' line above the
+;; link. Links that already have a `#+caption:' immediately above are
+;; skipped, so re-running the command only fills in new ones.
+
+(defun my/org-excalidraw-describe-all ()
+  "Asynchronously generate `#+caption:' descriptions for every excalidraw link."
+  (interactive)
+  (unless (executable-find "claude")
+    (user-error "`claude' CLI not found on PATH"))
+  (let ((buf (current-buffer))
+        (started 0))
+    (save-excursion
+      (goto-char (point-min))
+      (while (re-search-forward "\\[\\[excalidraw:\\([^]\n]+\\)\\]" nil t)
+        (let ((path (match-string-no-properties 1))
+              (line-start (line-beginning-position))
+              (already-captioned
+               (save-excursion
+                 (forward-line -1)
+                 (looking-at-p "^[ \t]*#\\+caption:"))))
+          (unless already-captioned
+            ;; Marker survives buffer edits from earlier sibling jobs.
+            (my/org-excalidraw--describe-one buf path (copy-marker line-start))
+            (cl-incf started)))))
+    (message "Started %d Claude description job(s)" started)))
+
+(defun my/org-excalidraw--describe-one (buf path line-marker)
+  "Run `claude -p' on PATH; insert `#+caption:' at LINE-MARKER in BUF."
+  (let* ((output (generate-new-buffer
+                  (format " *claude-excalidraw-%s*" (file-name-base path))))
+         (prompt (format
+                  "Read the Excalidraw SVG at %s and write ONE concise sentence describing what the diagram depicts. Output only that sentence — no preamble, no quotes, no markdown."
+                  path)))
+    (make-process
+     :name (format "claude-excalidraw-%s" (file-name-base path))
+     :buffer output
+     ;; `--add-dir' grants Claude read access to the SVG's directory.
+     ;; `--output-format json' gives a clean parseable result with no TUI noise.
+     :command (list "claude" "--add-dir" (file-name-directory path)
+                    "--output-format" "json" "-p" prompt)
+     :sentinel
+     (lambda (proc event)
+       (when (memq (process-status proc) '(exit signal))
+         (let ((raw (with-current-buffer (process-buffer proc)
+                      (buffer-string))))
+           (kill-buffer (process-buffer proc))
+           (cond
+            ((not (zerop (process-exit-status proc)))
+             (message "claude failed for %s: %s"
+                      (file-name-nondirectory path) (string-trim raw)))
+            ((not (buffer-live-p buf)) nil)
+            (t
+             (condition-case err
+                 (let* ((json (with-temp-buffer
+                                (insert raw)
+                                (goto-char (point-min))
+                                (json-parse-buffer :object-type 'alist)))
+                        (desc (string-trim (or (alist-get 'result json) "")))
+                        (sid (or (alist-get 'session_id json) "")))
+                   (if (string-empty-p desc)
+                       (message "claude returned empty for %s"
+                                (file-name-nondirectory path))
+                     (with-current-buffer buf
+                       (save-excursion
+                         (goto-char line-marker)
+                         (insert (format "# claude-session: %s\n#+caption: %s\n"
+                                         sid desc)))
+                       (message "Described %s" (file-name-nondirectory path)))))
+               (error
+                (message "claude JSON parse failed for %s: %s"
+                         (file-name-nondirectory path)
+                         (error-message-string err))))))))))))
 
 ;; ----- Forge: SPC g h prefix for GitHub PR/issue browsing -----
 ;; Register unconditionally — forge commands are autoloaded, so invoking
