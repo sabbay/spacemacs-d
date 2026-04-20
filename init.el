@@ -75,6 +75,7 @@ This function should only modify configuration layer settings."
    dotspacemacs-additional-packages
    '(solarized-theme
      reveal-in-osx-finder
+     org-remark
      (org-excalidraw :location (recipe :fetcher github :repo "wdavew/org-excalidraw")))
 
    ;; A list of packages that cannot be updated.
@@ -242,7 +243,7 @@ It should only modify the values of Spacemacs settings."
    ;; a non-negative integer (pixel size), or a floating-point (point size).
    ;; Point size is recommended, because it's device independent. (default 10.0)
    dotspacemacs-default-font '("Source Code Pro"
-                               :size 13.0
+                               :size 15.0
                                :weight normal
                                :width normal)
 
@@ -625,7 +626,7 @@ This function is called at the very end of Spacemacs initialization."
                 highlight-parentheses hl-todo holy-mode htmlize hungry-delete
                 hybrid-mode impatient-mode indent-guide info+ inspector ivy
                 link-hint lorem-ipsum macrostep multi-line nameless open-junk-file
-                org org-superstar overseer page-break-lines paradox
+                org org-remark org-superstar overseer page-break-lines paradox
                 password-generator pcre2el popwin pug-mode quickrun
                 rainbow-delimiters restart-emacs sass-mode scss-mode slim-mode
                 space-doc spaceline spacemacs-purpose-popwin

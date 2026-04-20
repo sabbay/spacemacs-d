@@ -573,11 +573,22 @@ Navigate          Stage/Commit       Remote            Branches & Logs    Forge 
 (require 'mcp-server)
 (setq mcp-server-socket-conflict-resolution 'error)
 ;; Allow buffer-editing primitives so Claude can edit live buffers without disk races.
+;; Also whitelists file I/O needed by the claude-collab test harness (temp files,
+;; find-file-noselect) and by org-remark annotation persistence (write-region).
 (setq mcp-server-security-allowed-dangerous-functions
-      '(with-current-buffer save-buffer insert goto-char))
+      '(with-current-buffer save-buffer insert goto-char
+        delete-region kill-buffer set-buffer set-visited-file-name
+        find-file-noselect write-region delete-file make-temp-file))
 (condition-case err
     (mcp-server-start-unix)
   (error (message "mcp-server: not started (%s)" err)))
+
+;; ----- claude-collab: annotations + session-scoped undo ---------------
+;; Module lives in ~/.spacemacs.d/lisp/claude-collab.el. See that file
+;; for architecture; tests in claude-collab-test.el.
+(add-to-list 'load-path (expand-file-name "~/.spacemacs.d/lisp"))
+(require 'claude-collab)
+
 
 (provide 'user-config)
 ;;; user-config.el ends here
