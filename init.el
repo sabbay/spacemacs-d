@@ -62,10 +62,6 @@ This function should only modify configuration layer settings."
      (claude-code :variables
                   claude-code-ide-window-side 'right
                   claude-code-ide-window-width 100
-                  ;; ~/.axcli/bin isn't on Emacs's exec-path under GUI launch,
-                  ;; so the package's PATH-based detection caches "unavailable".
-                  ;; Pin the absolute path to bypass detection entirely.
-                  claude-code-ide-cli-path "/Users/michalsz/.axcli/bin/claude"
                   ;; Always launch in YOLO mode — no per-tool prompts.
                   claude-code-ide-cli-extra-flags "--dangerously-skip-permissions"
                   ;; Route buffer/file edits through the local emacs-mcp-server
@@ -87,6 +83,7 @@ This function should only modify configuration layer settings."
    '(solarized-theme
      reveal-in-osx-finder
      org-remark
+     exec-path-from-shell
      (org-excalidraw :location (recipe :fetcher github :repo "wdavew/org-excalidraw")))
 
    ;; A list of packages that cannot be updated.
@@ -629,24 +626,24 @@ This function is called at the very end of Spacemacs initialization."
                 evil-iedit-state evil-indent-plus evil-lion evil-lisp-state
                 evil-matchit evil-mc evil-nerd-commenter evil-numbers
                 evil-surround evil-textobj-line evil-tutor evil-unimpaired
-                evil-visual-mark-mode evil-visualstar expand-region eyebrowse
-                fancy-battery golden-ratio google-translate haml-mode helm-ag
-                helm-comint helm-css-scss helm-descbinds helm-make
-                helm-mode-manager helm-org helm-projectile helm-purpose helm-swoop
-                helm-xref hide-comnt highlight-indentation highlight-numbers
-                highlight-parentheses hl-todo holy-mode htmlize hungry-delete
-                hybrid-mode impatient-mode indent-guide info+ inspector ivy
-                link-hint lorem-ipsum macrostep multi-line nameless open-junk-file
-                org org-remark org-superstar overseer page-break-lines paradox
-                password-generator pcre2el popwin pug-mode quickrun
-                rainbow-delimiters restart-emacs sass-mode scss-mode slim-mode
-                space-doc spaceline spacemacs-purpose-popwin
-                spacemacs-whitespace-cleanup string-edit-at-point
-                string-inflection swiper symbol-overlay symon tagedit term-cursor
-                toc-org transient treemacs-evil treemacs-icons-dired
-                treemacs-persp treemacs-projectile undo-fu-session uuidgen
-                vi-tilde-fringe volatile-highlights vundo web-completion-data
-                web-mode wgrep winum writeroom-mode ws-butler)))
+                evil-visual-mark-mode evil-visualstar exec-path-from-shell
+                expand-region eyebrowse fancy-battery golden-ratio
+                google-translate haml-mode helm-ag helm-comint helm-css-scss
+                helm-descbinds helm-make helm-mode-manager helm-org
+                helm-projectile helm-purpose helm-swoop helm-xref hide-comnt
+                highlight-indentation highlight-numbers highlight-parentheses
+                hl-todo holy-mode htmlize hungry-delete hybrid-mode impatient-mode
+                indent-guide info+ inspector ivy link-hint lorem-ipsum macrostep
+                multi-line nameless open-junk-file org org-remark org-superstar
+                overseer page-break-lines paradox password-generator pcre2el
+                popwin pug-mode quickrun rainbow-delimiters restart-emacs
+                sass-mode scss-mode slim-mode space-doc spaceline
+                spacemacs-purpose-popwin spacemacs-whitespace-cleanup
+                string-edit-at-point string-inflection swiper symbol-overlay symon
+                tagedit term-cursor toc-org transient treemacs-evil
+                treemacs-icons-dired treemacs-persp treemacs-projectile
+                undo-fu-session uuidgen vi-tilde-fringe volatile-highlights vundo
+                web-completion-data web-mode wgrep winum writeroom-mode ws-butler)))
   (custom-set-faces
    ;; custom-set-faces was added by Custom.
    ;; If you edit it by hand, you could mess it up, so be careful.
