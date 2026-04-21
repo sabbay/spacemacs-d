@@ -61,7 +61,18 @@ This function should only modify configuration layer settings."
                  typescript-linter 'eslint)
      (claude-code :variables
                   claude-code-ide-window-side 'right
-                  claude-code-ide-window-width 100))
+                  claude-code-ide-window-width 100
+                  ;; ~/.axcli/bin isn't on Emacs's exec-path under GUI launch,
+                  ;; so the package's PATH-based detection caches "unavailable".
+                  ;; Pin the absolute path to bypass detection entirely.
+                  claude-code-ide-cli-path "/Users/michalsz/.axcli/bin/claude"
+                  ;; Always launch in YOLO mode — no per-tool prompts.
+                  claude-code-ide-cli-extra-flags "--dangerously-skip-permissions"
+                  ;; Route buffer/file edits through the local emacs-mcp-server
+                  ;; so changes hit live Emacs buffers (no on-disk races, undo
+                  ;; integrates with Emacs, no need to re-revert files).
+                  claude-code-ide-system-prompt
+                  "You are running inside an Emacs editing session. An MCP server named `emacs-mcp` is attached and exposes tools for reading and modifying live Emacs buffers (open buffers, point/region, insert, replace, save, etc.). ALWAYS prefer the emacs-mcp tools over the generic Read/Edit/Write filesystem tools when interacting with files the user has open in Emacs — this avoids disk races and keeps Emacs's undo history coherent. Only fall back to filesystem tools for files that are not currently visited by an Emacs buffer."))
 
 
    ;; List of additional packages that will be installed without being wrapped

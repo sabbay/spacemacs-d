@@ -595,6 +595,15 @@ Navigate          Stage/Commit       Remote            Branches & Logs    Forge 
 (add-to-list 'load-path (expand-file-name "~/.spacemacs.d/lisp"))
 (require 'claude-collab)
 
+;; claude-code-ide uses project.el's `project-current' to pick the working
+;; directory, but Spacemacs uses Projectile — so it falls back to ~ for any
+;; buffer outside a project.el-recognised root. Prefer Projectile's root.
+(with-eval-after-load 'claude-code-ide
+  (advice-add 'claude-code-ide--get-working-directory :around
+              (lambda (orig)
+                (or (and (fboundp 'projectile-project-root)
+                         (ignore-errors (projectile-project-root)))
+                    (funcall orig)))))
 
 (provide 'user-config)
 ;;; user-config.el ends here
