@@ -43,6 +43,12 @@
             plantuml-jar-path jar
             plantuml-default-exec-mode 'jar)))
 
+  ;; Route ob-plantuml through the `plantuml' wrapper script instead of
+  ;; `java -jar …' directly. macOS ships a /usr/bin/java stub that only
+  ;; pops the "install Java" dialog; the wrapper hard-codes the brew-
+  ;; installed openjdk path, so PlantUML actually runs.
+  (setq org-plantuml-exec-mode 'plantuml)
+
   ;; Languages we execute in babel blocks. PlantUML + dot cover every
   ;; diagram shape; typescript + shell + emacs-lisp are for literate
   ;; scaffolding.
