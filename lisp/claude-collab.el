@@ -462,6 +462,228 @@ label round-trips across save/reload — overlay props don't."
             (org-remark-highlight-mark beg end nil nil label)))))))
 
 
+;;; Structural editing primitives
+;;
+;; Three composable tools instead of one monolithic edit RPC:
+;;
+;;   `claude-collab-apply-annotation' — annotation-scoped edit + auto-resolve.
+;;   `claude-collab-get-region-bounds' — pure query: what are the buffer
+;;                                       positions for <structural unit> at
+;;                                       this annotation's anchor?
+;;   `claude-collab-apply-edit'        — dumb (begin,end,new-text) primitive.
+;;
+;; LSP, Aider, Cursor, Claude Code Edit and MCP filesystem all resolve
+;; structure to a concrete range BEFORE the edit RPC. We follow the same
+;; split so Claude composes: resolve first, mutate second.
+
+(defun claude-collab--normalize-action (action)
+  "Normalize ACTION (symbol, keyword, or string) to a keyword."
+  (cond
+   ((keywordp action) action)
+   ((symbolp action) (intern (concat ":" (symbol-name action))))
+   ((stringp action)
+    (intern (if (string-prefix-p ":" action) action (concat ":" action))))
+   (t (error "Invalid action: %S" action))))
+
+(defun claude-collab--normalize-unit (unit)
+  "Normalize UNIT (symbol, keyword, string, or nil) to a keyword.
+Defaults to :annotation when UNIT is nil or an empty string."
+  (cond
+   ((null unit) :annotation)
+   ((keywordp unit) unit)
+   ((symbolp unit) (intern (concat ":" (symbol-name unit))))
+   ((stringp unit)
+    (if (string-empty-p unit)
+        :annotation
+      (intern (if (string-prefix-p ":" unit) unit (concat ":" unit)))))
+   (t (error "Invalid unit: %S" unit))))
+
+(defun claude-collab--edit-region (buffer begin end new-text)
+  "In BUFFER, replace BEGIN..END with NEW-TEXT and save the buffer.
+Shared low-level helper for `claude-collab-apply-annotation' and
+`claude-collab-apply-edit'. BEGIN == END means pure insertion."
+  (with-current-buffer buffer
+    (save-excursion
+      (goto-char begin)
+      (unless (= begin end)
+        (delete-region begin end))
+      (insert (or new-text "")))
+    (save-buffer)))
+
+(defun claude-collab-apply-annotation (id action &optional new-text)
+  "Apply ACTION to the annotation with ID, optionally using NEW-TEXT.
+ACTION is one of :replace, :insert-before, :insert-after, :delete.
+Uses the live overlay's current bounds (not the stored :begin/:end,
+which drift). Auto-resolves the annotation on success.
+
+Returns a plist (:ok t :new-begin N :new-end M :resolved t|nil) or
+a plist (:error MSG) on failure."
+  (let* ((action (claude-collab--normalize-action action))
+         (found (claude-collab--find-annotation id)))
+    (cond
+     ((not found)
+      (list :error (format "Annotation not found: %s" id)))
+     (t
+      (let* ((buf (car found))
+             (ov (cdr found))
+             (file (buffer-file-name buf)))
+        (cond
+         ((not (buffer-live-p buf))
+          (list :error (format "File not open in Emacs: %s" file)))
+         ((and (memq action '(:replace :insert-before :insert-after))
+               (not (stringp new-text)))
+          (list :error (format "Action %s requires :new-text" action)))
+         (t
+          (let* ((ov-beg (overlay-start ov))
+                 (ov-end (overlay-end ov))
+                 new-begin new-end)
+            (pcase action
+              (:replace
+               (claude-collab--edit-region buf ov-beg ov-end new-text)
+               (setq new-begin ov-beg
+                     new-end (+ ov-beg (length new-text))))
+              (:insert-before
+               (claude-collab--edit-region buf ov-beg ov-beg new-text)
+               (setq new-begin ov-beg
+                     new-end (+ ov-beg (length new-text))))
+              (:insert-after
+               (claude-collab--edit-region buf ov-end ov-end new-text)
+               (setq new-begin ov-end
+                     new-end (+ ov-end (length new-text))))
+              (:delete
+               (claude-collab--edit-region buf ov-beg ov-end "")
+               (setq new-begin ov-beg
+                     new-end ov-beg))
+              (_
+               (error "Unknown action: %S" action)))
+            (let ((resolved
+                   (condition-case _err
+                       (progn (claude-collab-resolve-annotation-by-id id) t)
+                     (error nil))))
+              (list :ok t
+                    :new-begin new-begin
+                    :new-end new-end
+                    :resolved resolved))))))))))
+
+(defun claude-collab--trim-paragraph-bounds (begin end)
+  "Trim leading/trailing blank-line runs between BEGIN and END.
+Returns (BEG . END) adjusted so paragraph separators are excluded."
+  (save-excursion
+    (goto-char begin)
+    (skip-chars-forward " \t\n" end)
+    (let ((b (point)))
+      (goto-char end)
+      (skip-chars-backward " \t\n" b)
+      (cons (if (<= b (point)) b begin)
+            (if (>= (point) b) (point) end)))))
+
+(defun claude-collab-get-region-bounds (id &optional unit)
+  "Return bounds for UNIT around annotation ID's anchor.
+UNIT is one of :annotation (default), :line, :paragraph, :section, :list-item.
+
+Returns a plist (:ok t :begin N :end M) or (:error MSG). Pure query —
+does not mutate the buffer or move user-visible point."
+  (let* ((unit (claude-collab--normalize-unit unit))
+         (found (claude-collab--find-annotation id)))
+    (cond
+     ((not found)
+      (list :error (format "Annotation not found: %s" id)))
+     (t
+      (let* ((buf (car found))
+             (ov (cdr found))
+             (file (buffer-file-name buf)))
+        (cond
+         ((not (buffer-live-p buf))
+          (list :error (format "File not open in Emacs: %s" file)))
+         (t
+          (with-current-buffer buf
+            (save-excursion
+              (save-restriction
+                (widen)
+                (let ((anchor (overlay-start ov))
+                      (ov-end (overlay-end ov)))
+                  (goto-char anchor)
+                  (pcase unit
+                    (:annotation
+                     (list :ok t :begin anchor :end ov-end))
+                    (:line
+                     (list :ok t
+                           :begin (line-beginning-position)
+                           :end (line-end-position)))
+                    (:paragraph
+                     (let (pb pe)
+                       (save-excursion
+                         (backward-paragraph)
+                         (setq pb (point))
+                         (goto-char anchor)
+                         (forward-paragraph)
+                         (setq pe (point)))
+                       (let ((trimmed (claude-collab--trim-paragraph-bounds pb pe)))
+                         (list :ok t :begin (car trimmed) :end (cdr trimmed)))))
+                    (:section
+                     (cond
+                      ((not (derived-mode-p 'org-mode))
+                       (list :error "Unit :section requires org-mode"))
+                      (t
+                       (condition-case err
+                           (let (sb se)
+                             (save-excursion
+                               (org-back-to-heading t)
+                               (setq sb (point))
+                               (org-end-of-subtree t t)
+                               (setq se (point)))
+                             (list :ok t :begin sb :end se))
+                         (error (list :error (format "Section lookup failed: %s"
+                                                      (error-message-string err))))))))
+                    (:list-item
+                     (cond
+                      ((not (derived-mode-p 'org-mode))
+                       (list :error "Unit :list-item requires org-mode"))
+                      ((not (and (fboundp 'org-at-item-p) (org-at-item-p)))
+                       ;; Might be inside the item body rather than on its bullet.
+                       ;; Try walking up to the item's beginning.
+                       (let ((item-start
+                              (save-excursion
+                                (condition-case nil
+                                    (progn (org-beginning-of-item) (point))
+                                  (error nil)))))
+                         (cond
+                          ((null item-start)
+                           (list :error "Not in a list item"))
+                          (t
+                           (save-excursion
+                             (goto-char item-start)
+                             (let ((ib (point)) ie)
+                               (org-end-of-item)
+                               (setq ie (point))
+                               (list :ok t :begin ib :end ie)))))))
+                      (t
+                       (let (ib ie)
+                         (save-excursion
+                           (org-beginning-of-item)
+                           (setq ib (point))
+                           (org-end-of-item)
+                           (setq ie (point)))
+                         (list :ok t :begin ib :end ie)))))
+                    (_
+                     (list :error (format "Unknown unit: %S" unit)))))))))))))))
+
+(defun claude-collab-apply-edit (file begin end new-text)
+  "Replace FILE's BEGIN..END region with NEW-TEXT and save.
+BEGIN == END means insert at that point. NEW-TEXT may be the empty
+string (explicit deletion). Returns (:ok t :new-begin N :new-end M)
+or (:error MSG) if the file is not open in Emacs."
+  (let ((buf (find-buffer-visiting file)))
+    (cond
+     ((not (buffer-live-p buf))
+      (list :error (format "File not open in Emacs: %s" file)))
+     (t
+      (claude-collab--edit-region buf begin end new-text)
+      (list :ok t
+            :new-begin begin
+            :new-end (+ begin (length (or new-text ""))))))))
+
+
 ;;; MCP tool registrations
 
 (defun claude-collab--mcp-list-annotations (args)
@@ -478,6 +700,40 @@ label round-trips across save/reload — overlay props don't."
     (unless id (error "Missing required arg: id"))
     (let ((data (claude-collab-resolve-annotation-by-id id)))
       (format "Resolved annotation %s: %S" id data))))
+
+(defun claude-collab--mcp-arg (args key)
+  "Look up KEY in ARGS, accepting both symbol and string keys."
+  (or (alist-get key args)
+      (alist-get (symbol-name key) args nil nil #'equal)))
+
+(defun claude-collab--mcp-apply-annotation (args)
+  "MCP handler: apply ACTION to annotation ID.
+Required keys in ARGS: :id, :action. Optional: :new-text."
+  (let ((id (claude-collab--mcp-arg args 'id))
+        (action (claude-collab--mcp-arg args 'action))
+        (new-text (claude-collab--mcp-arg args 'new-text)))
+    (unless id (error "Missing required arg: id"))
+    (unless action (error "Missing required arg: action"))
+    (format "%S" (claude-collab-apply-annotation id action new-text))))
+
+(defun claude-collab--mcp-get-region-bounds (args)
+  "MCP handler: return bounds of UNIT around annotation ID."
+  (let ((id (claude-collab--mcp-arg args 'id))
+        (unit (claude-collab--mcp-arg args 'unit)))
+    (unless id (error "Missing required arg: id"))
+    (format "%S" (claude-collab-get-region-bounds id unit))))
+
+(defun claude-collab--mcp-apply-edit (args)
+  "MCP handler: apply a dumb buffer edit between BEGIN and END."
+  (let ((file (claude-collab--mcp-arg args 'file))
+        (begin (claude-collab--mcp-arg args 'begin))
+        (end (claude-collab--mcp-arg args 'end))
+        (new-text (claude-collab--mcp-arg args 'new-text)))
+    (unless file (error "Missing required arg: file"))
+    (unless (integerp begin) (error "Missing or non-integer arg: begin"))
+    (unless (integerp end) (error "Missing or non-integer arg: end"))
+    (unless (stringp new-text) (error "Missing required arg: new-text"))
+    (format "%S" (claude-collab-apply-edit file begin end new-text))))
 
 (defun claude-collab--mcp-run-tests (_args)
   "MCP handler: run the ERT suite; return pass/fail plist."
@@ -510,6 +766,48 @@ label round-trips across save/reload — overlay props don't."
                                              (description . "Annotation ID")))))
                       (required . ("id")))
       :function #'claude-collab--mcp-resolve-annotation))
+    (mcp-server-register-tool
+     (make-mcp-server-tool
+      :name "claude-collab-apply-annotation"
+      :title "Apply Annotation Edit"
+      :description "Edit the region of an annotation using its live overlay bounds, then auto-resolve. Action is one of replace|insert-before|insert-after|delete. new-text is required for all actions except delete."
+      :input-schema '((type . "object")
+                      (properties . ((id . ((type . "string")
+                                             (description . "Annotation ID")))
+                                     (action . ((type . "string")
+                                                (description . "replace | insert-before | insert-after | delete")))
+                                     (new-text . ((type . "string")
+                                                   (description . "Text to insert/replace. Required unless action is delete.")))))
+                      (required . ("id" "action")))
+      :function #'claude-collab--mcp-apply-annotation))
+    (mcp-server-register-tool
+     (make-mcp-server-tool
+      :name "claude-collab-get-region-bounds"
+      :title "Get Region Bounds For Annotation"
+      :description "Pure query. Return buffer begin/end positions for a structural unit anchored at an annotation. unit is one of annotation|line|paragraph|section|list-item (default annotation). :section and :list-item require org-mode."
+      :input-schema '((type . "object")
+                      (properties . ((id . ((type . "string")
+                                             (description . "Annotation ID")))
+                                     (unit . ((type . "string")
+                                               (description . "annotation | line | paragraph | section | list-item")))))
+                      (required . ("id")))
+      :function #'claude-collab--mcp-get-region-bounds))
+    (mcp-server-register-tool
+     (make-mcp-server-tool
+      :name "claude-collab-apply-edit"
+      :title "Apply Buffer Edit"
+      :description "Dumb primitive: replace FILE[BEGIN..END] with NEW-TEXT and save. BEGIN == END inserts. Empty NEW-TEXT deletes. No annotation or structural knowledge."
+      :input-schema '((type . "object")
+                      (properties . ((file . ((type . "string")
+                                               (description . "Absolute file path.")))
+                                     (begin . ((type . "integer")
+                                                (description . "Buffer begin position.")))
+                                     (end . ((type . "integer")
+                                              (description . "Buffer end position. Equal to begin means insert.")))
+                                     (new-text . ((type . "string")
+                                                   (description . "Replacement text (may be empty).")))))
+                      (required . ("file" "begin" "end" "new-text")))
+      :function #'claude-collab--mcp-apply-edit))
     (mcp-server-register-tool
      (make-mcp-server-tool
       :name "claude-collab-run-tests"

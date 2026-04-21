@@ -207,6 +207,180 @@ Routes through `mcp-server-security-safe-eval' so the advice fires."
       (claude-collab--revert-session 'test-session-7)
       (should (= 1 (length (claude-collab--annotations-in-buffer buf)))))))
 
+;;; --- new structural editing tool tests ---
+
+(defmacro claude-collab-test--with-annotated-buffer (var-buf var-file var-id text &rest body)
+  "Create a temp file whose buffer holds an org-remark annotation.
+Binds VAR-BUF, VAR-FILE, and VAR-ID (the annotation id) for BODY.
+TEXT is a literal substring of the buffer to highlight. Uses
+`org-remark-highlight-mark' when available, otherwise fabricates an
+overlay carrying `org-remark-id' directly — both paths exercise the
+live-overlay lookup in `claude-collab--find-annotation'."
+  (declare (indent 4))
+  `(claude-collab-test--with-temp-file ,var-buf ,var-file
+     (with-current-buffer ,var-buf
+       (goto-char (point-min))
+       (unless (search-forward ,text nil t)
+         (error "Highlight text %S not found in test buffer" ,text))
+       (let* ((b (match-beginning 0))
+              (e (match-end 0))
+              (,var-id
+               (if (fboundp 'org-remark-highlight-mark)
+                   (let ((ov (org-remark-highlight-mark b e nil nil "test-note")))
+                     (overlay-get ov 'org-remark-id))
+                 (let ((ov (make-overlay b e))
+                       (fake-id (format "fake-%d-%d" b (random 100000))))
+                   (overlay-put ov 'org-remark-id fake-id)
+                   (overlay-put ov 'category 'org-remark-highlighter)
+                   (overlay-put ov 'org-remark-label "test-note")
+                   fake-id))))
+         ,@body))))
+
+(defun claude-collab-test--fabricate-overlay-in (buf begin end)
+  "Fabricate an org-remark-style overlay in BUF over BEGIN..END.
+Returns the annotation ID. Bypasses `org-remark-highlight-mark' so
+tests run even when org-remark isn't loaded."
+  (with-current-buffer buf
+    (let ((ov (make-overlay begin end))
+          (id (format "fake-%d-%d-%d" begin end (random 100000))))
+      (overlay-put ov 'org-remark-id id)
+      (overlay-put ov 'category 'org-remark-highlighter)
+      (overlay-put ov 'org-remark-label "test-note")
+      id)))
+
+(ert-deftest claude-collab-test-apply-annotation-replace ()
+  "apply-annotation :replace swaps the annotated region and auto-resolves."
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-temp-file buf _file
+    ;; Highlight "world" (positions 7..12 in "Hello world,...").
+    (let ((id (claude-collab-test--fabricate-overlay-in buf 7 12)))
+      (let ((result (claude-collab-apply-annotation id :replace "there")))
+        (should (plist-get result :ok))
+        (should (= 7 (plist-get result :new-begin)))
+        (should (= 12 (plist-get result :new-end))))
+      (should (string-prefix-p "Hello there,"
+                               (with-current-buffer buf (buffer-string))))
+      ;; Overlay should be gone (resolved).
+      (with-current-buffer buf
+        (should (null (cl-find-if
+                       (lambda (o) (equal (overlay-get o 'org-remark-id) id))
+                       (overlays-in (point-min) (point-max))))))
+      ;; Also safe to skip org-remark-delete gracefully when unavailable;
+      ;; the fabricated overlay is cleaned up via delete-overlay fallback.
+      )))
+
+(ert-deftest claude-collab-test-apply-annotation-delete ()
+  "apply-annotation :delete removes the annotated region and auto-resolves."
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-temp-file buf _file
+    (let ((id (claude-collab-test--fabricate-overlay-in buf 7 13)))
+      ;; 7..13 covers "world,".
+      (let ((result (claude-collab-apply-annotation id :delete)))
+        (should (plist-get result :ok))
+        (should (= 7 (plist-get result :new-begin)))
+        (should (= 7 (plist-get result :new-end))))
+      (should (string-prefix-p "Hello  this"
+                               (with-current-buffer buf (buffer-string)))))))
+
+(ert-deftest claude-collab-test-apply-annotation-missing-id ()
+  "apply-annotation returns :error for unknown ID."
+  (claude-collab-test--reset-state)
+  (let ((result (claude-collab-apply-annotation "no-such-id" :replace "x")))
+    (should (plist-get result :error))
+    (should (string-match-p "not found" (plist-get result :error)))))
+
+(ert-deftest claude-collab-test-get-region-bounds-annotation ()
+  "get-region-bounds :annotation matches the overlay bounds."
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-temp-file buf _file
+    (let ((id (claude-collab-test--fabricate-overlay-in buf 7 12)))
+      (let ((result (claude-collab-get-region-bounds id :annotation)))
+        (should (plist-get result :ok))
+        (should (= 7 (plist-get result :begin)))
+        (should (= 12 (plist-get result :end)))))))
+
+(ert-deftest claude-collab-test-get-region-bounds-line ()
+  "get-region-bounds :line returns the full line containing the anchor."
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-temp-file buf _file
+    ;; First line: "Hello world, this is a starting line." = 38 chars, ends at 38.
+    (let ((id (claude-collab-test--fabricate-overlay-in buf 7 12)))
+      (let ((result (claude-collab-get-region-bounds id :line)))
+        (should (plist-get result :ok))
+        (should (= 1 (plist-get result :begin)))
+        (should (= 38 (plist-get result :end)))))))
+
+(ert-deftest claude-collab-test-get-region-bounds-section ()
+  "get-region-bounds :section returns heading start through end-of-subtree."
+  (claude-collab-test--reset-state)
+  (let ((tmp (make-temp-file "claude-collab-test-" nil ".org")))
+    (unwind-protect
+        (let ((buf (find-file-noselect tmp)))
+          (unwind-protect
+              (with-current-buffer buf
+                (erase-buffer)
+                (insert "* Heading One\nAlpha body line.\nAnother body line.\n* Heading Two\nBeta body line.\n")
+                (save-buffer)
+                (org-mode)
+                ;; Highlight "Alpha" inside Heading One's subtree.
+                (goto-char (point-min))
+                (search-forward "Alpha")
+                (let* ((b (match-beginning 0))
+                       (e (match-end 0))
+                       (id (claude-collab-test--fabricate-overlay-in buf b e))
+                       (result (claude-collab-get-region-bounds id :section)))
+                  (should (plist-get result :ok))
+                  ;; Section begins at position 1 (heading start).
+                  (should (= 1 (plist-get result :begin)))
+                  ;; Ends before second heading — content should include "Another body line.\n"
+                  (let* ((begin (plist-get result :begin))
+                         (end (plist-get result :end))
+                         (slice (buffer-substring-no-properties begin end)))
+                    (should (string-match-p "\\`\\* Heading One" slice))
+                    (should (string-match-p "Another body line" slice))
+                    (should-not (string-match-p "Heading Two" slice)))))
+            (with-current-buffer buf (set-buffer-modified-p nil))
+            (kill-buffer buf)))
+      (when (file-exists-p tmp) (delete-file tmp)))))
+
+(ert-deftest claude-collab-test-get-region-bounds-missing-id ()
+  "get-region-bounds returns :error for unknown ID."
+  (claude-collab-test--reset-state)
+  (let ((result (claude-collab-get-region-bounds "no-such-id" :annotation)))
+    (should (plist-get result :error))
+    (should (string-match-p "not found" (plist-get result :error)))))
+
+(ert-deftest claude-collab-test-apply-edit-insert ()
+  "apply-edit with begin == end inserts at the position."
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-temp-file buf file
+    (let ((result (claude-collab-apply-edit file 1 1 "START-")))
+      (should (plist-get result :ok))
+      (should (= 1 (plist-get result :new-begin)))
+      (should (= 7 (plist-get result :new-end))))
+    (should (string-prefix-p "START-Hello"
+                             (with-current-buffer buf (buffer-string))))))
+
+(ert-deftest claude-collab-test-apply-edit-replace ()
+  "apply-edit with begin < end replaces the region."
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-temp-file buf file
+    ;; Replace "Hello" (1..6) with "Howdy".
+    (let ((result (claude-collab-apply-edit file 1 6 "Howdy")))
+      (should (plist-get result :ok))
+      (should (= 1 (plist-get result :new-begin)))
+      (should (= 6 (plist-get result :new-end))))
+    (should (string-prefix-p "Howdy world"
+                             (with-current-buffer buf (buffer-string))))))
+
+(ert-deftest claude-collab-test-apply-edit-file-not-open ()
+  "apply-edit returns :error when file is not open in any buffer."
+  (claude-collab-test--reset-state)
+  (let ((result (claude-collab-apply-edit "/tmp/no-such-claude-collab-file.txt"
+                                          1 1 "x")))
+    (should (plist-get result :error))
+    (should (string-match-p "not open" (plist-get result :error)))))
+
 ;;; --- entry point ---
 
 (defun claude-collab-run-tests ()
