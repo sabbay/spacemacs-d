@@ -1,0 +1,23 @@
+{
+  "skill_name": "design",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "ok I've been putting off dark mode in the settings panel for three sprints now and my designer is starting to send me passive-aggressive slack messages. can you /design a plan for adding dark mode support? we've got a theme context already but it's light-only, and the settings UI has like 40 components that need to be audited",
+      "expected_output": "An org-mode plan file under ./plans/YYYY-MM-DD-<slug>.org (or ~/plans/ if not in a repo). File contains the required sections (Goal, Approach, Architecture with PlantUML :file arch.png src block, Steps with :files: properties and [ ] checkboxes, Risks, Open questions). Chat reports the path and how to annotate.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "/design",
+      "expected_output": "Claude asks exactly one clarifying question: 'What are you designing?' and waits for the user's reply before writing anything. Does not guess a topic.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "/design status",
+      "expected_output": "Claude enumerates .org plan files under the current scope (./plans/ if in a repo, else ~/plans/). For each, reports a bullet line with the filename, pending annotation count via claude-collab-list-annotations, and a relative mtime. If no plans exist, reports that cleanly.",
+      "files": []
+    }
+  ]
+}
