@@ -501,13 +501,14 @@ Defaults to :annotation when UNIT is nil or an empty string."
 (defun claude-collab--edit-region (buffer begin end new-text)
   "In BUFFER, replace BEGIN..END with NEW-TEXT and save the buffer.
 Shared low-level helper for `claude-collab-apply-annotation' and
-`claude-collab-apply-edit'. BEGIN == END means pure insertion."
+`claude-collab-apply-edit'. BEGIN == END means pure insertion.
+NEW-TEXT must be a string — callers are expected to have validated."
   (with-current-buffer buffer
     (save-excursion
       (goto-char begin)
       (unless (= begin end)
         (delete-region begin end))
-      (insert (or new-text "")))
+      (insert new-text))
     (save-buffer)))
 
 (defun claude-collab-apply-annotation (id action &optional new-text)
@@ -582,7 +583,18 @@ Returns (BEG . END) adjusted so paragraph separators are excluded."
 UNIT is one of :annotation (default), :line, :paragraph, :section, :list-item.
 
 Returns a plist (:ok t :begin N :end M) or (:error MSG). Pure query —
-does not mutate the buffer or move user-visible point."
+does not mutate the buffer or move user-visible point.
+
+Notes on specific units:
+
+- :paragraph — the returned :end may be one character short when the
+  paragraph's final newline is the last character of the buffer; the
+  trim logic drops trailing whitespace.
+- :section — the returned :end sits just before the next heading or
+  `point-max'. Replacing this range via `claude-collab-apply-edit'
+  will consume the trailing newline between this section and the
+  next, so callers should end their replacement text with a newline
+  if they want the separator preserved."
   (let* ((unit (claude-collab--normalize-unit unit))
          (found (claude-collab--find-annotation id)))
     (cond
@@ -670,18 +682,34 @@ does not mutate the buffer or move user-visible point."
 
 (defun claude-collab-apply-edit (file begin end new-text)
   "Replace FILE's BEGIN..END region with NEW-TEXT and save.
-BEGIN == END means insert at that point. NEW-TEXT may be the empty
-string (explicit deletion). Returns (:ok t :new-begin N :new-end M)
-or (:error MSG) if the file is not open in Emacs."
-  (let ((buf (find-buffer-visiting file)))
-    (cond
-     ((not (buffer-live-p buf))
-      (list :error (format "File not open in Emacs: %s" file)))
-     (t
-      (claude-collab--edit-region buf begin end new-text)
-      (list :ok t
-            :new-begin begin
-            :new-end (+ begin (length (or new-text ""))))))))
+BEGIN == END means insert at that point. NEW-TEXT must be a string
+(may be empty — explicit deletion). Returns (:ok t :new-begin N
+:new-end M) or (:error MSG) if the file is not open, BEGIN/END are
+not integers, the range is inverted, or the range is out of bounds."
+  (cond
+   ((not (stringp new-text))
+    (list :error "new-text must be a string"))
+   ((not (and (integerp begin) (integerp end)))
+    (list :error "Invalid position: begin and end must be integers"))
+   (t
+    (let ((buf (find-buffer-visiting file)))
+      (cond
+       ((not (buffer-live-p buf))
+        (list :error (format "File not open in Emacs: %s" file)))
+       ((> begin end)
+        (list :error (format "Invalid range: begin (%d) > end (%d)" begin end)))
+       (t
+        (with-current-buffer buf
+          (let ((pmin (point-min)) (pmax (point-max)))
+            (cond
+             ((or (< begin pmin) (> end pmax))
+              (list :error (format "Range %d..%d out of bounds (%d..%d)"
+                                   begin end pmin pmax)))
+             (t
+              (claude-collab--edit-region buf begin end new-text)
+              (list :ok t
+                    :new-begin begin
+                    :new-end (+ begin (length new-text)))))))))))))
 
 
 ;;; MCP tool registrations

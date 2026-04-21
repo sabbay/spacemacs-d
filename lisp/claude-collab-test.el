@@ -381,6 +381,73 @@ tests run even when org-remark isn't loaded."
     (should (plist-get result :error))
     (should (string-match-p "not open" (plist-get result :error)))))
 
+(ert-deftest claude-collab-test-apply-edit-non-integer-positions ()
+  "apply-edit returns :error when begin/end are not integers."
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-temp-file _buf file
+    (let ((result (claude-collab-apply-edit file "1" 6 "x")))
+      (should (plist-get result :error))
+      (should (string-match-p "must be integers" (plist-get result :error))))
+    (let ((result (claude-collab-apply-edit file 1 nil "x")))
+      (should (plist-get result :error))
+      (should (string-match-p "must be integers" (plist-get result :error))))))
+
+(ert-deftest claude-collab-test-apply-edit-inverted-range ()
+  "apply-edit returns :error when begin > end."
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-temp-file _buf file
+    (let ((result (claude-collab-apply-edit file 10 5 "x")))
+      (should (plist-get result :error))
+      (should (string-match-p "begin (10) > end (5)" (plist-get result :error))))))
+
+(ert-deftest claude-collab-test-apply-edit-out-of-bounds ()
+  "apply-edit returns :error when the range exceeds buffer bounds."
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-temp-file buf file
+    (let* ((pmax (with-current-buffer buf (point-max)))
+           (result (claude-collab-apply-edit file 1 (+ pmax 100) "x")))
+      (should (plist-get result :error))
+      (should (string-match-p "out of bounds" (plist-get result :error))))
+    (let ((result (claude-collab-apply-edit file 0 5 "x")))
+      (should (plist-get result :error))
+      (should (string-match-p "out of bounds" (plist-get result :error))))))
+
+(ert-deftest claude-collab-test-apply-edit-nil-new-text ()
+  "apply-edit returns :error when new-text is nil."
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-temp-file _buf file
+    (let ((result (claude-collab-apply-edit file 1 1 nil)))
+      (should (plist-get result :error))
+      (should (string-match-p "new-text must be a string"
+                              (plist-get result :error))))))
+
+(ert-deftest claude-collab-test-apply-annotation-nil-new-text ()
+  "apply-annotation rejects non-string new-text for replace/insert-*."
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-temp-file buf _file
+    (let ((id (claude-collab-test--fabricate-overlay-in buf 7 12)))
+      (let ((result (claude-collab-apply-annotation id :replace nil)))
+        (should (plist-get result :error))
+        (should (string-match-p "requires :new-text" (plist-get result :error))))
+      (let ((result (claude-collab-apply-annotation id :insert-before 42)))
+        (should (plist-get result :error))
+        (should (string-match-p "requires :new-text"
+                                (plist-get result :error)))))))
+
+(ert-deftest claude-collab-test-apply-annotation-real-org-remark ()
+  "Exercise the real `org-remark-highlight-mark' path via `with-annotated-buffer'.
+We only assert the edit landed; `:resolved' may be nil if the batch
+environment has no marginalia notes file configured."
+  (skip-unless (fboundp 'org-remark-highlight-mark))
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-annotated-buffer buf _file id "world"
+    (let ((result (claude-collab-apply-annotation id :replace "there")))
+      (should (plist-get result :ok))
+      (should (= 7 (plist-get result :new-begin)))
+      (should (= 12 (plist-get result :new-end))))
+    (should (string-prefix-p "Hello there,"
+                             (with-current-buffer buf (buffer-string))))))
+
 ;;; --- entry point ---
 
 (defun claude-collab-run-tests ()
