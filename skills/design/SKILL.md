@@ -1,6 +1,6 @@
 ---
 name: design
-description: Use this skill whenever the user wants to author, revise, or list an org-mode design/plan document. Triggers on /design, and on phrases like "design X", "plan X", "sketch a plan for X", "write a design doc for X". Produces a structured org-mode file with a PlantUML architecture diagram, and supports an annotation-driven revision loop via claude-collab. Use this skill even when the user doesn't explicitly say "design" — if they're proposing to plan, outline, or architect anything non-trivial, this is the right tool. It replaces the generic plan-writing flow for users working in Emacs.
+description: Use this skill whenever the user wants to plan, design, outline, or architect anything non-trivial — this is the user's default planning flow. Triggers on /design, on phrases like "design X", "plan X", "sketch a plan for X", "write a design doc for X", and any request to think through an implementation before coding. Three subcommands — /design <topic> (author), /design revise (apply claude-collab annotations and resolve clarifications), /design status (list plans). Produces a structured org-mode file with a PlantUML architecture diagram, supports an annotation-driven revision loop via claude-collab in Emacs. This is the preferred planning flow — the user works in Emacs and has chosen it over generic markdown-spec workflows.
 ---
 
 # /design — Org-mode plan authoring
@@ -58,12 +58,13 @@ This treats same-day same-topic invocations as "resume" rather than clobber.
 
 ### Write the template
 
-Fill in the skeleton below based on what you know about the topic. The section headings are required; content inside each is your judgment call. Aim for terse prose — the user will iterate via annotations, and dense first drafts waste their edit budget.
+Fill in the skeleton below. Section headings are required; content is your judgment. Keep Goal and Approach ≤150 words each, Steps descriptions ≤2 paragraphs, and Risks bullets ≤1 sentence each — the revise loop is where content matures, so dense first drafts waste the user's edit budget.
 
 ```org
 #+TITLE: <topic>
 #+DATE: <YYYY-MM-DD>
 #+STARTUP: showall inlineimages
+#+TODO: TODO CLARIFY(c) | DONE RESOLVED(r)
 
 * Goal
   <1–2 paragraphs: what this builds and why now.>
@@ -83,7 +84,9 @@ Fill in the skeleton below based on what you know about the topic. The section h
 * Steps
   1. [ ] <First concrete step>
      :PROPERTIES:
-     :files: <comma-separated files this step touches>
+     :files:  <comma-separated files this step touches>
+     :tests:  <comma-separated test files or names — empty if no test applies>
+     :verify: <observable that confirms the step worked — e.g. "pytest path::name passes", "curl :8080/health returns 200", "diff output is empty">
      :END:
      <One short paragraph: what the step does and why.>
 
@@ -101,10 +104,67 @@ Required rules when filling the template:
 
 - The PlantUML block MUST have a `:file <slug>-arch.png` header argument. Without it, `claude-collab-auto-render-diagrams-mode` skips the block and the diagram won't appear inline.
 - The `#+STARTUP: showall inlineimages` line is mandatory — it ensures rendered PNGs display the next time the file is opened.
-- Each Step heading MUST have a `:files:` org property even if the list is short; it's the one piece of structure that pays off during implementation.
+- The `#+TODO: TODO CLARIFY(c) | DONE RESOLVED(r)` line is mandatory — it colorizes the `CLARIFY` keyword used for Step-level clarifications (see "Clarifications" below). Without it, `CLARIFY` is rendered as plain text and the visual signal is lost.
+- Each Step heading MUST have `:files:`, `:tests:`, and `:verify:` org properties. `:files:` names files the step touches; `:tests:` names the test(s) that cover the step (empty string if no test applies — e.g., a pure docs change); `:verify:` is the concrete observable that proves the step worked. These aren't for mandating red/green TDD — they're so execution has a concrete pass/fail signal per step. A step with no verifiable outcome can't be trusted as done.
 - If a section genuinely has no content (e.g., no open questions yet), write `- <none for now>` rather than deleting the section — keep the skeleton stable.
 
 If the Write tool fails (directory not writable, disk full, etc.), report the failure path and error to the user and stop — do not proceed to Open in Emacs.
+
+### Clarifications (CLARIFY convention)
+
+When drafting, you will hit assumptions that aren't stated in the user's input. Do not silently guess — silent guesses hide decisions nobody made and ship as invisible bugs. Instead, surface each assumption as a visible clarification marker and keep drafting around it.
+
+Two granularities:
+
+**Inline (prose-level)** — for single-assumption questions that sit inside a paragraph or Step description:
+
+```org
+We retry on =[CLARIFY: what counts as a transient failure?]= responses.
+```
+
+Use verbatim markup (`=…=`) — every org theme colorizes it distinctly, so the marker stays visible during normal scanning without hiding the surrounding prose.
+
+**Heading (Step-level)** — for Steps you can't responsibly design without more input:
+
+```org
+** CLARIFY Step 5: Caching layer
+   :PROPERTIES:
+   :files:  <TBD — depends on backend choice>
+   :tests:  <TBD — depends on backend choice>
+   :verify: Decision captured in Approach; matching Open questions bullet ticked.
+   :END:
+   Blocked on: which cache backend (Redis, Memcached, in-process)?
+```
+
+The `CLARIFY` TODO keyword renders in org's TODO-face color. Use this when the ambiguity affects the whole Step's shape, not just a single sentence. CLARIFY-heading Steps still require the three properties — use stub values that name what's blocked (e.g. `<TBD — depends on backend choice>`) until the decision lands. This keeps the "every Step has properties" invariant programmatically checkable and makes the blocker obvious at a glance.
+
+**Mirror to Open questions** — every CLARIFY marker you add MUST have a matching unchecked bullet in `* Open questions`, with an org internal link back to the location:
+
+```org
+* Open questions
+  - [ ] [[*Step 5 Caching layer][Step 5]]: which cache backend?
+  - [ ] [[*Step 3 Rate limiting handler][Step 3]]: what counts as transient?
+  - [ ] Initial numeric tier values (free / standard / enterprise)?
+```
+
+The relationship is **markers ⊆ Open questions**: every inline or heading CLARIFY marker mirrors to a bullet, but Open questions may contain additional bullets that have no inline counterpart. Use free-standing bullets (no internal link) when the question is broad enough that no single prose location would naturally hold it — e.g., cross-cutting numeric values, policy decisions that span multiple Steps, or questions that are genuinely "outside the draft". When a free-standing bullet could reasonably be pinned to one location, prefer an inline/heading CLARIFY with a mirror — in-context visibility is more useful than a bare list.
+
+Open questions is the authoritative checklist — when all its bullets are checked, the plan is clarification-free. Inline markers and CLARIFY keywords are for in-context visibility; Open questions is for completeness auditing.
+
+**When NOT to CLARIFY:**
+- The answer is obvious from surrounding context (e.g., "returns JSON" in a plan where every other endpoint returns JSON).
+- The answer is low-stakes and reversible (file naming, variable naming — pick one, move on; the user can rename).
+- The question has no meaningful disagreement axis — a CLARIFY is worth the user's attention, and noise dilutes the signal of real ones.
+
+### Self-review
+
+Before opening in Emacs, do a two-way coverage scan on the draft. The aim is to catch both under-building (something in Goal isn't addressed by any Step) and over-building (a Step doesn't trace back to Goal). One-way scans miss scope creep.
+
+**Scan 1 — Goal → Steps:** For each requirement or outcome stated in Goal or Approach, identify which Step implements it. If a requirement has no Step, either add the Step or file a `- [ ] [[target][label]]: <question>` bullet in Open questions with a matching CLARIFY inline/heading marker. Don't leave requirements dangling.
+
+**Scan 2 — Steps → Goal:** For each Step, name which Goal/Approach bullet it serves. If a Step doesn't map to anything in Goal/Approach, either hoist its motivation into Approach (if the scope genuinely grew) or delete the Step (it's scope creep).
+
+Fix any gaps inline. No separate review report — correct the draft before opening it.
 
 ### Open in Emacs
 
@@ -123,6 +183,13 @@ One short chat message:
 > "Wrote `<relative-path>`. Opened in Emacs. Annotate with `SPC o c c` on a selected region, then `/design revise` to apply annotations. `SPC o c l` lists pending annotations in the buffer."
 
 ## Revise mode
+
+Revise mode handles two input channels, both feeding into the same edit machinery:
+
+1. **Annotation-driven (Emacs)** — user highlights text, adds a claude-collab annotation via `SPC o c c`, runs `/design revise` to apply. Primary flow.
+2. **Conversational (chat)** — user answers a CLARIFY question in chat without opening Emacs ("For Step 3, transient = 5xx or 429 without Retry-After"). Treat as a CLARIFY resolution and apply via the same buffer-edit tools so the live Emacs buffer updates even though the trigger was a chat message.
+
+Annotation-driven and conversational flows share the three-step resolve (see "Resolving CLARIFY markers" below) — only the input channel differs.
 
 ### Determine target file
 
@@ -170,7 +237,7 @@ For each annotation, in file order:
    - "combine with next" / "merge 5 and 6" → merge items.
    - "expand" / "more detail" → rewrite with more specificity.
    - "reword: X" → replace the text with X.
-   - Free-form prose → interpret as an instruction and apply your best edit.
+   - Free-form prose → interpret as an instruction and apply the smallest edit that satisfies it. Prefer replacing only the annotated region; widen scope (via `claude-collab-get-region-bounds`) only when the instruction plainly reaches beyond the highlight.
 2. Edit the **live Emacs buffer**, NOT the file on disk. Two reasons: (a) the user may have unsaved changes in the buffer, and a disk edit would either clobber them or lose the update when Emacs flags divergence; (b) annotation `:begin`/`:end` from `claude-collab-list-annotations` are buffer positions at save time — they drift as the buffer mutates, so always resolve the live overlay before editing.
 
    Three MCP tools cover the edit patterns:
@@ -189,6 +256,33 @@ For each annotation, in file order:
    `claude-collab-apply-annotation` auto-resolves the annotation on success, so no separate `claude-collab-resolve-annotation` call is needed. When using the `get-region-bounds` + `apply-edit` path, always follow up with an explicit `claude-collab-resolve-annotation` call — otherwise the annotation keeps showing as pending.
 
 3. After the edit lands, the annotation should be resolved (auto via `apply-annotation`, or explicitly via `claude-collab-resolve-annotation`).
+
+### Resolving CLARIFY markers
+
+A CLARIFY marker (inline `=[CLARIFY: …]=` or heading `CLARIFY` keyword) is resolved when the user supplies the answer. Resolution is distinct from a generic edit instruction — it replaces the question with an answer rather than modifying surrounding text.
+
+**Detect a CLARIFY resolution:**
+
+- **Annotation channel**: the annotation overlaps a `=[CLARIFY: …]=` span or sits on a heading whose TODO keyword is `CLARIFY`. The annotation `:label:` is the user's answer.
+- **Chat channel**: the user's message identifies a clarification and provides an answer. Examples: *"resolve the rate-limit question with 5xx or 429 without Retry-After"*, *"for Step 3, transient means ..."*, or a declarative answer that clearly maps to exactly one open CLARIFY.
+
+**The three-step resolve** (applies to either channel):
+
+1. **Replace the marker:**
+   - Inline `=[CLARIFY: question]=` → rewrite as resolved prose drawn from the answer. Annotation channel: `claude-collab-apply-annotation` with `:action replace :new-text "<resolved prose>"` (auto-resolves). Chat channel: `claude-collab-get-region-bounds` + `claude-collab-apply-edit`.
+   - Heading with `CLARIFY` keyword → rewrite the Step body to incorporate the answer, then cycle the heading keyword off (remove `CLARIFY`, leave the heading plain) via `claude-collab-apply-edit` on the heading line.
+
+2. **Tick the matching Open questions bullet:** locate the `- [ ]` bullet whose internal link target matches the resolved marker (by heading target for Step-level, or by question text for inline). Change `- [ ]` to `- [X]`.
+
+3. **Resolve the annotation** (annotation channel only, and only when the first step didn't auto-resolve): call `claude-collab-resolve-annotation` with the `:id`.
+
+### Edge cases
+
+- **Partial resolution** — user supplied answers for 2 of 5 pending clarifications. Resolve those two; leave the rest untouched. Report: *"Resolved 2 clarifications. 3 still pending in Open questions."*
+- **Ambiguous match** — user's answer could resolve multiple CLARIFY markers (two "rate limiting" questions, say). Do not guess. Ask: *"Which CLARIFY did you mean — Step 3 (transient failure definition) or Step 7 (client-side backoff)?"* Resolve only after disambiguation.
+- **Underspecified answer** — the user's answer introduces a new hole ("retry on errors" — which errors?). Replace the original CLARIFY with the partial resolution, and append a follow-up `=[CLARIFY: which errors qualify?]=` in the same spot. Mirror the new question to Open questions (new unchecked bullet). Report: *"Resolved partially; follow-up clarification added at <location>."* Never silently downgrade to a weaker assumption — that's the exact failure mode CLARIFY is designed to prevent.
+- **No matching CLARIFY** — user's chat message looks like a resolution but no matching CLARIFY exists (misremembered, or already resolved in a prior session). Ask for clarification: *"I don't see an open CLARIFY matching that — did you mean <closest candidate>, or are you asking me to edit something else?"* Never edit silently based on a guess.
+- **Wrong direction / undo** — if the user realizes a prior resolution was wrong, they edit the org file directly (or create a new annotation with a correcting instruction). There is no "undo resolution" command — the plan is plain org text, not a state machine, and the annotation history isn't a rollback log.
 
 ### Report back
 
@@ -241,6 +335,84 @@ One bullet per plan, sorted most-recently-modified first:
 ```
 
 Use a short relative time like "2h ago", "3d ago", "just now". If the count is zero, still list the plan (it's completed or untouched — user wants to see it).
+
+## Examples
+
+Three end-to-end traces. Use these as patterns to match against when you're unsure how a flow should play out.
+
+### Example 1 — Author mode (new plan with CLARIFY markers)
+
+**User:** `/design rate limiter for our public REST API`
+
+**Resolution:** topic = `rate limiter for our public REST API` → slug = `rate-limiter-for-our-public-rest-api` → filename = `2026-04-21-rate-limiter-for-our-public-rest-api.org`. Repo root detected, so target = `<repo>/plans/`.
+
+**Draft written** (abbreviated — showing just the CLARIFY-relevant pieces):
+
+```org
+#+TITLE: rate limiter for our public REST API
+#+DATE: 2026-04-21
+#+STARTUP: showall inlineimages
+#+TODO: TODO CLARIFY(c) | DONE RESOLVED(r)
+
+* Approach
+  Token bucket in Redis, keyed by API credential. Tiers
+  (free/standard/enterprise) refresh via TTL. We fail open on
+  =[CLARIFY: reuse the existing shared Redis cluster, or provision
+  a dedicated one?]= Redis unavailability to avoid blocking the API.
+
+* Steps
+  3. [ ] Gateway middleware
+     :PROPERTIES:
+     :files:  gateway/middleware/ratelimit.go
+     :tests:  gateway/middleware/ratelimit_test.go
+     :verify: 429 returned with RateLimit-* headers for over-quota keys
+     :END:
+     Reads bucket, decrements, emits RFC 9331 headers, returns 429 on
+     rejection.
+
+* Open questions
+  - [ ] [[*Approach][Approach]]: reuse shared Redis cluster or
+    provision a new one?
+  - [ ] Initial numeric tier values (free/standard/enterprise req/sec)?
+  - [ ] Unauthenticated-endpoint keying (per-IP, per-ASN, per-route)?
+```
+
+One inline CLARIFY mirrored to Open questions (linked), two free-standing Open-questions bullets for cross-cutting decisions that don't pin to one prose location — consistent with the `markers ⊆ Open questions` rule.
+
+**Chat report:** *"Wrote `plans/2026-04-21-rate-limiter-for-our-public-rest-api.org`. Opened in Emacs. 3 Open questions (1 mirrored CLARIFY, 2 cross-cutting). Annotate with `SPC o c c` on a selected region, then `/design revise` to apply annotations."*
+
+### Example 2 — Conversational CLARIFY resolution
+
+**Context:** Example 1's plan is open in Emacs. User has read it and knows one answer.
+
+**User (chat, not annotation):** *"For the Redis question — reuse the shared cluster. We already pay for it and latency is fine."*
+
+**Claude's steps:**
+1. Read the currently-open plan (via `mcp__emacs__eval-elisp` → `buffer-file-name`).
+2. Grep for `[CLARIFY:` markers + matching text. One match: the inline marker in Approach.
+3. Replace via `claude-collab-apply-edit` with resolved prose: *"We fail open on shared-Redis-cluster unavailability to avoid blocking the API."*
+4. Find the matching Open questions bullet (internal link target: `*Approach`) and tick it `- [X]`.
+5. No annotation to resolve — this was chat-channel.
+
+**Chat report:** *"Resolved 1 clarification in Approach (Redis cluster reuse). 2 Open questions still pending."*
+
+### Example 3 — Annotation-driven CLARIFY resolution
+
+**Context:** User is in Emacs, selects `=[CLARIFY: reuse the existing shared Redis cluster, or provision a dedicated one?]=`, hits `SPC o c c`, types in the annotation label: *"Reuse shared cluster — already provisioned, latency OK"*. Runs `/design revise`.
+
+**Claude's steps:**
+1. `claude-collab-list-annotations` returns one pending annotation on the CLARIFY span.
+2. Detect: annotation overlaps `=[CLARIFY: …]=` → treat label as resolution, not a generic edit.
+3. `claude-collab-apply-annotation` with `:action replace :new-text "shared-Redis-cluster"` (auto-resolves annotation on success).
+4. Prose now reads: *"We fail open on shared-Redis-cluster unavailability..."*.
+5. Find matching Open questions bullet, tick it.
+
+**Chat report:**
+```
+- Approach / "reuse the existing shared Redis cluster..." → Resolved: reuse shared cluster. Ticked matching Open questions bullet.
+```
+
+Note: when the label reads like an *edit instruction* ("reword to emphasize latency") rather than an *answer* ("reuse shared cluster"), you're back in the normal reword/skip/expand patterns from "Apply each annotation" — not a CLARIFY resolution. The shape of the label tells you which path to take.
 
 ## Style notes
 
