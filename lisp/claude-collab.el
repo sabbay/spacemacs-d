@@ -680,6 +680,75 @@ On diff failure or exit 2+, falls back to a naive two-section dump."
       (ignore-errors (delete-file file-a))
       (ignore-errors (delete-file file-b)))))
 
+(defface claude-collab-track-removed-face
+  '((((background light))
+     :foreground "#b4232c" :strike-through t :background "#fde8ea")
+    (((background dark))
+     :foreground "#ff8a8a" :strike-through t :background "#3a1a1f"))
+  "Face for deleted text in the track-changes diff view (Google-Docs style).")
+
+(defface claude-collab-track-added-face
+  '((((background light))
+     :foreground "#116329" :underline t :background "#e6f4ea" :weight bold)
+    (((background dark))
+     :foreground "#7ee787" :underline t :background "#1a2b1d" :weight bold))
+  "Face for inserted text in the track-changes diff view (Google-Docs style).")
+
+(defun claude-collab--compute-word-diff (before after)
+  "Return `git diff --no-index --word-diff=plain' body between BEFORE and AFTER.
+Git's word-diff wraps removed spans as [-…-] and added spans as {+…+} inline,
+which is what we want for a Google-Docs track-changes-style render."
+  (let* ((file-a (make-temp-file "cc-word-before-"))
+         (file-b (make-temp-file "cc-word-after-"))
+         (coding-system-for-write 'utf-8)
+         (coding-system-for-read  'utf-8))
+    (unwind-protect
+        (progn
+          (write-region (or before "") nil file-a nil 'silent)
+          (write-region (or after  "") nil file-b nil 'silent)
+          (with-temp-buffer
+            ;; --unified=9999 forces the whole file into one hunk so the
+            ;; surrounding context isn't elided — we want the full fused text.
+            (call-process "git" nil t nil
+                          "diff" "--no-index" "--no-color"
+                          "--word-diff=plain"
+                          "--unified=9999"
+                          file-a file-b)
+            (goto-char (point-min))
+            (if (re-search-forward "^@@.*@@\n" nil t)
+                (buffer-substring (point) (point-max))
+              "")))
+      (ignore-errors (delete-file file-a))
+      (ignore-errors (delete-file file-b)))))
+
+(defun claude-collab--fontify-word-diff (diff-str)
+  "Turn [-x-] / {+x+} markers in DIFF-STR into faced spans, strip leading +/-."
+  (with-temp-buffer
+    (insert diff-str)
+    ;; Strip the leading " "/"+"/"-" column git diff prefixes onto every line.
+    ;; With word-diff, these are redundant with the inline markers and just
+    ;; add noise to prose.
+    (goto-char (point-min))
+    (while (not (eobp))
+      (when (looking-at "^[ +-]")
+        (delete-char 1))
+      (forward-line 1))
+    ;; [- removed -]  →  strikethrough red
+    (goto-char (point-min))
+    (while (re-search-forward "\\[-\\(\\(?:.\\|\n\\)*?\\)-\\]" nil t)
+      (let ((removed (match-string 1)))
+        (replace-match
+         (propertize removed 'face 'claude-collab-track-removed-face)
+         t t)))
+    ;; {+ added +}  →  underline green
+    (goto-char (point-min))
+    (while (re-search-forward "{\\+\\(\\(?:.\\|\n\\)*?\\)\\+}" nil t)
+      (let ((added (match-string 1)))
+        (replace-match
+         (propertize added 'face 'claude-collab-track-added-face)
+         t t)))
+    (buffer-string)))
+
 (defun claude-collab--colorize-unified-diff (diff-str)
   "Apply diff-mode faces per line to DIFF-STR."
   (mapconcat
@@ -713,20 +782,22 @@ On diff failure or exit 2+, falls back to a naive two-section dump."
                 "\n")))))
 
 (defun claude-collab--format-diff-card (edit)
-  "Build the propertized string shown in the diff posframe for EDIT."
+  "Build the propertized string shown in the diff posframe for EDIT.
+Same track-changes rendering as the side-window panel: strikethrough for
+deletions, underline for insertions, fused over the surrounding context."
   (let* ((pos (claude-collab--edit-position-in-session edit))
          (header (propertize
                   (format " Claude edit · %d/%d · %s \n"
                           (car pos) (cdr pos)
                           (claude-collab--diff-summary edit))
                   'face 'claude-collab-diff-header-face))
-         (unified (claude-collab--compute-unified-diff
-                   (claude-collab-edit-before-text edit)
-                   (claude-collab-edit-after-text edit)))
-         (colored (claude-collab--colorize-unified-diff unified))
-         (capped (claude-collab--elide-diff-lines
-                  colored claude-collab-diff-popup-max-lines)))
-    (concat header capped)))
+         (wd (claude-collab--compute-word-diff
+              (claude-collab-edit-before-text edit)
+              (claude-collab-edit-after-text edit)))
+         (body (if (string-empty-p wd)
+                   "(no differences)"
+                 (claude-collab--fontify-word-diff wd))))
+    (concat header body)))
 
 (defun claude-collab--popup-buffer-setup ()
   "Configure posframe buffer for word wrap; safe to call repeatedly."
@@ -756,27 +827,41 @@ On diff failure or exit 2+, falls back to a naive two-section dump."
     (posframe-hide claude-collab--diff-popup-buffer)))
 
 (defun claude-collab--show-diff-panel (edit)
-  "Open or update the side-window diff-mode panel for EDIT."
+  "Open or update the side-window panel with a track-changes view of EDIT.
+Deletions show as red strikethrough, insertions as green underline, all
+fused inline over the surrounding context — Google-Docs-suggesting style."
   (let* ((buf (get-buffer-create claude-collab--diff-panel-buffer))
          (pos (claude-collab--edit-position-in-session edit))
          (source-name (claude-collab-edit-buffer-name edit))
-         (unified (claude-collab--compute-unified-diff
-                   (claude-collab-edit-before-text edit)
-                   (claude-collab-edit-after-text edit))))
+         (word-diff (claude-collab--compute-word-diff
+                     (claude-collab-edit-before-text edit)
+                     (claude-collab-edit-after-text edit)))
+         (body (if (string-empty-p word-diff)
+                   "(no differences)"
+                 (claude-collab--fontify-word-diff word-diff))))
     (with-current-buffer buf
+      ;; Drop any lingering diff-mode / read-only state from older renders.
+      (when (derived-mode-p 'diff-mode) (fundamental-mode))
       (let ((inhibit-read-only t))
         (erase-buffer)
-        (insert (format "Claude edit %d/%d in %s · %s\n"
-                        (car pos) (cdr pos) source-name
-                        (claude-collab--diff-summary edit)))
-        (insert "--- before\n+++ after\n")
-        (insert unified))
+        (insert (propertize
+                 (format " Claude edit %d/%d  ·  %s  ·  %s \n"
+                         (car pos) (cdr pos) source-name
+                         (claude-collab--diff-summary edit))
+                 'face 'claude-collab-diff-header-face))
+        (insert (propertize
+                 (concat "  "
+                         (propertize "removed" 'face 'claude-collab-track-removed-face)
+                         "   "
+                         (propertize "added" 'face 'claude-collab-track-added-face)
+                         "\n\n")
+                 'face 'shadow))
+        (insert body))
       (goto-char (point-min))
-      (unless (derived-mode-p 'diff-mode)
-        (diff-mode))
-      (setq-local buffer-read-only t)
-      (when (re-search-forward "^@@" nil t)
-        (beginning-of-line)))
+      (setq-local truncate-lines nil
+                  word-wrap t)
+      (visual-line-mode 1)
+      (setq-local buffer-read-only t))
     (display-buffer
      buf
      '((display-buffer-in-side-window)
@@ -834,6 +919,114 @@ only render as a posframe card."
     (claude-collab--hide-diff-card)
     (claude-collab--hide-diff-panel)
     (setq claude-collab--diff-popup-current-edit nil)))
+
+
+;;; Auto-render diagram src blocks on idle
+
+(defcustom claude-collab-auto-render-diagrams-languages
+  '("plantuml" "dot" "ditaa" "mermaid")
+  "Babel languages whose `:file' src blocks get auto-rendered."
+  :type '(repeat string))
+
+(defcustom claude-collab-auto-render-idle-delay 1.5
+  "Seconds of idle time before re-rendering changed diagram blocks."
+  :type 'number)
+
+(defvar-local claude-collab--auto-render-timer nil)
+(defvar-local claude-collab--auto-render-hashes nil
+  "Alist `((BEG . HASH) …)' of blocks already rendered for their current body.")
+(defvar claude-collab--auto-render-running nil
+  "Non-nil while a render pass is in progress; suppresses re-scheduling.")
+
+(defun claude-collab--auto-render-now (&optional target-buffer)
+  "Execute every whitelisted diagram block whose body changed since last render.
+Optional TARGET-BUFFER defaults to the current buffer."
+  (let ((buf (or target-buffer (current-buffer))))
+    (when (and (buffer-live-p buf)
+               (not claude-collab--auto-render-running))
+      (with-current-buffer buf
+        (when (derived-mode-p 'org-mode)
+          (let ((claude-collab--auto-render-running t)
+                (org-confirm-babel-evaluate nil)
+                (any-rendered nil))
+            (save-excursion
+              (org-babel-map-src-blocks nil
+                (when (member lang claude-collab-auto-render-diagrams-languages)
+                  (let* ((params (nth 2 (org-babel-get-src-block-info 'light)))
+                         (target (cdr (assq :file params)))
+                         (current-hash (and target (md5 (or body ""))))
+                         (last-hash (and target
+                                         (alist-get beg-block
+                                                    claude-collab--auto-render-hashes))))
+                    (when (and target (not (equal current-hash last-hash)))
+                      (ignore-errors (org-babel-execute-src-block))
+                      (setf (alist-get beg-block
+                                       claude-collab--auto-render-hashes)
+                            current-hash)
+                      (setq any-rendered t))))))
+            (when any-rendered
+              (org-display-inline-images nil t))))))))
+
+(defun claude-collab--auto-render-schedule (&rest _)
+  "`after-change-functions' hook: (re)start the idle timer."
+  (unless claude-collab--auto-render-running
+    (when (timerp claude-collab--auto-render-timer)
+      (cancel-timer claude-collab--auto-render-timer))
+    (let ((buf (current-buffer)))
+      (setq claude-collab--auto-render-timer
+            (run-with-idle-timer
+             claude-collab-auto-render-idle-delay nil
+             (lambda () (claude-collab--auto-render-now buf)))))))
+
+(define-minor-mode claude-collab-auto-render-diagrams-mode
+  "Auto-execute plantuml / dot / mermaid / ditaa blocks after a short idle.
+Only blocks with a `:file' header and whose body has actually changed are
+re-rendered.  Inline image previews refresh automatically."
+  :lighter " cc-render"
+  (if claude-collab-auto-render-diagrams-mode
+      (progn
+        (unless claude-collab--auto-render-hashes
+          (setq claude-collab--auto-render-hashes nil))
+        (add-hook 'after-change-functions
+                  #'claude-collab--auto-render-schedule nil t)
+        ;; Also render once on mode-entry so already-present blocks pick up.
+        (claude-collab--auto-render-schedule))
+    (remove-hook 'after-change-functions
+                 #'claude-collab--auto-render-schedule t)
+    (when (timerp claude-collab--auto-render-timer)
+      (cancel-timer claude-collab--auto-render-timer)
+      (setq claude-collab--auto-render-timer nil))))
+
+;; Auto-enable in all org buffers. Users who don't want it can
+;;   (remove-hook 'org-mode-hook #'claude-collab-auto-render-diagrams-mode)
+(add-hook 'org-mode-hook #'claude-collab-auto-render-diagrams-mode)
+
+;; --- Cap inline image height -----------------------------------------
+;; `org-image-actual-width' caps width but org has no public max-height
+;; setting in 9.8. A full-page PlantUML flow chart renders at ~1500px
+;; tall and dominates the buffer. Inject `:max-height' into the image
+;; object before `insert-image' via `:filter-return' advice.
+
+(defcustom claude-collab-inline-image-max-height 520
+  "Maximum pixel height for inline images in org buffers.
+Set to nil to disable capping.  Applied via advice on
+`org--create-inline-image' since org 9.8 has no public equivalent."
+  :type '(choice (const :tag "No cap" nil) integer))
+
+(defun claude-collab--cap-inline-image-height (img)
+  "`:filter-return' advice: cap IMG's height at `claude-collab-inline-image-max-height'."
+  (when (and img
+             (consp img)
+             (eq (car img) 'image)
+             claude-collab-inline-image-max-height
+             (not (plist-member (cdr img) :max-height)))
+    (setcdr img (plist-put (cdr img) :max-height
+                           claude-collab-inline-image-max-height)))
+  img)
+
+(with-eval-after-load 'org
+  (advice-add 'org--create-inline-image :filter-return
+              #'claude-collab--cap-inline-image-height))
 
 
 (defun claude-collab-add-annotation (beg end note)
