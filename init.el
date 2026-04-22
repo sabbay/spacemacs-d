@@ -84,6 +84,9 @@ This function should only modify configuration layer settings."
      reveal-in-osx-finder
      org-remark
      exec-path-from-shell
+     yaml-mode
+     plantuml-mode
+     plz
      (org-excalidraw :location (recipe :fetcher github :repo "wdavew/org-excalidraw")))
 
    ;; A list of packages that cannot be updated.
@@ -636,14 +639,15 @@ This function is called at the very end of Spacemacs initialization."
                 indent-guide info+ inspector ivy link-hint lorem-ipsum macrostep
                 multi-line nameless open-junk-file org org-remark org-superstar
                 overseer page-break-lines paradox password-generator pcre2el
-                popwin pug-mode quickrun rainbow-delimiters restart-emacs
-                sass-mode scss-mode slim-mode space-doc spaceline
+                plantuml-mode plz popwin pug-mode quickrun rainbow-delimiters
+                restart-emacs sass-mode scss-mode slim-mode space-doc spaceline
                 spacemacs-purpose-popwin spacemacs-whitespace-cleanup
                 string-edit-at-point string-inflection swiper symbol-overlay symon
                 tagedit term-cursor toc-org transient treemacs-evil
                 treemacs-icons-dired treemacs-persp treemacs-projectile
                 undo-fu-session uuidgen vi-tilde-fringe volatile-highlights vundo
-                web-completion-data web-mode wgrep winum writeroom-mode ws-butler)))
+                web-completion-data web-mode wgrep winum writeroom-mode ws-butler
+                yaml-mode)))
   (custom-set-faces
    ;; custom-set-faces was added by Custom.
    ;; If you edit it by hand, you could mess it up, so be careful.

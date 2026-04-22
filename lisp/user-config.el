@@ -3,6 +3,17 @@
 ;; Loaded by dotspacemacs/user-config in ../init.el at the very end of
 ;; Spacemacs startup, after layer configuration.
 
+;; Thorough PATH sync: spawn a login+interactive zsh once and mirror
+;; its PATH plus a few extras into Emacs's process-environment. The
+;; first-aid dolist in user-init.el covers claude/axcli/plantuml for
+;; eager layer-load calls; this call picks up nvm, pyenv, and anything
+;; else the interactive shell injects via rc scripts.
+(when (or (memq window-system '(mac ns x)) (daemonp))
+  (require 'exec-path-from-shell)
+  (dolist (var '("NODE_EXTRA_CA_CERTS" "LANG" "LC_ALL" "MONDAY_API_TOKEN"))
+    (add-to-list 'exec-path-from-shell-variables var))
+  (exec-path-from-shell-initialize))
+
 ;; Soft-wrap long lines everywhere: prose files, code, logs, shell output.
 ;; Wraps at word boundaries, doesn't modify the file. C-a/C-e respect
 ;; visual lines. Toggle per-buffer with `SPC t l' or `M-x visual-line-mode'.
@@ -66,11 +77,41 @@
   (setq org-startup-with-inline-images t
         org-image-actual-width '(700))
   (add-hook 'org-babel-after-execute-hook #'org-redisplay-inline-images)
+  ;; Teach org which major mode fontifies each #+begin_src language.
+  ;; Stock `org-src-lang-modes' covers C/shell/elisp; these four are the
+  ;; ones we actually use in plans and design docs.
+  (dolist (pair '(("ts"         . typescript-ts)
+                  ("typescript" . typescript-ts)
+                  ("yaml"       . yaml)
+                  ("yml"        . yaml)
+                  ("plantuml"   . plantuml)))
+    (add-to-list 'org-src-lang-modes pair))
   ;; Refactor-plan lives here — keep it in the agenda so TODOs show up.
   (add-to-list 'org-agenda-files
                (expand-file-name
                 "~/Development/promptdecor/docs/code-health/ABSTRACTION_REFACTOR_PLAN.org")
                t))
+
+;; Collapse plantuml src blocks on file open — the rendered PNG below
+;; is the thing you want to read; the PlantUML source is noise until
+;; you're actively editing it. TAB on the block header reopens it.
+(defun my/fold-plantuml-src-blocks ()
+  "Hide every plantuml src block in the current buffer."
+  (when (derived-mode-p 'org-mode)
+    (save-excursion
+      (org-babel-map-src-blocks nil
+        (when (string= lang "plantuml")
+          (goto-char beg-block)
+          (ignore-errors (org-hide-block-toggle t)))))))
+(add-hook 'org-mode-hook #'my/fold-plantuml-src-blocks)
+
+;; Hammerspoon menu-bar integration — exposes plan summaries + jump-to
+;; actions for the Lua side at ~/.hammerspoon/claude.lua.
+;; Ensure ~/.spacemacs.d/lisp/ is on `load-path' for every local module
+;; required from this file (menubar-export, claude-collab,
+;; monday-docs-sync, etc.).
+(add-to-list 'load-path (expand-file-name "~/.spacemacs.d/lisp"))
+(require 'menubar-export)
 
 ;; ----- Image popup for org-mode (SVG / PNG / JPG in a floating frame) -----
 ;; Press `C-c C-x v' (or `, v' via Spacemacs leader) with point on an inline
@@ -594,6 +635,14 @@ Navigate          Stage/Commit       Remote            Branches & Logs    Forge 
 ;; for architecture; tests in claude-collab-test.el.
 (add-to-list 'load-path (expand-file-name "~/.spacemacs.d/lisp"))
 (require 'claude-collab)
+
+;; ----- monday-docs-sync: one-way sync of org files to Monday docs -----
+;; Module lives in ~/.spacemacs.d/lisp/monday-docs-sync.el. See the plan
+;; at ~/Development/github-actions-shared/plans/2026-04-22-org-to-monday-docs-one-way-sync.org.
+(require 'monday-docs-sync)
+(spacemacs/declare-prefix "om" "monday-docs")
+(spacemacs/set-leader-keys "oms" #'monday-docs-sync
+                           "oma" #'monday-docs-sync-abort)
 
 ;; claude-code-ide uses project.el's `project-current' to pick the working
 ;; directory, but Spacemacs uses Projectile — so it falls back to ~ for any
