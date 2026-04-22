@@ -1254,8 +1254,10 @@ only render as a posframe card."
   "Babel languages whose `:file' src blocks get auto-rendered."
   :type '(repeat string))
 
-(defcustom claude-collab-auto-render-idle-delay 1.5
-  "Seconds of idle time before re-rendering changed diagram blocks."
+(defcustom claude-collab-auto-render-idle-delay 2.5
+  "Seconds of idle time before re-rendering changed diagram blocks.
+Tuned a little longer than typical typing cadence so normal editing
+doesn't repeatedly fire babel."
   :type 'number)
 
 (defvar-local claude-collab--auto-render-timer nil)
@@ -1264,17 +1266,130 @@ only render as a posframe card."
 (defvar claude-collab--auto-render-running nil
   "Non-nil while a render pass is in progress; suppresses re-scheduling.")
 
+(defvar-local claude-collab--auto-render-in-flight nil
+  "Set of (BEG . HASH) pairs currently being rendered asynchronously.
+Used to avoid re-firing the same block while its subprocess is still
+running, without poisoning the success-only hash map when the render
+fails.")
+
+(defun claude-collab--auto-render-record-success (buf beg hash)
+  "Mark block at BEG in BUF as successfully rendered with HASH."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (setf (alist-get beg claude-collab--auto-render-hashes) hash)
+      (setq claude-collab--auto-render-in-flight
+            (delete (cons beg hash)
+                    claude-collab--auto-render-in-flight)))))
+
+(defun claude-collab--auto-render-record-failure (buf beg hash)
+  "Release the in-flight lock for block at BEG in BUF without stamping HASH.
+Leaves the last-known-good hash alone so the next scheduler tick retries."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (setq claude-collab--auto-render-in-flight
+            (delete (cons beg hash)
+                    claude-collab--auto-render-in-flight)))))
+
+(defun claude-collab--ensure-result-link (buf beg-block target-file)
+  "Ensure the src block starting at BEG-BLOCK in BUF is followed by
+a `#+RESULTS: [[file:TARGET-FILE]]' link.
+
+The async render path bypasses `org-babel-execute-src-block' (which
+normally inserts results itself), so on first render there is no
+file link for org to overlay the image onto. This helper inserts a
+minimal RESULTS stanza when absent, matching the src block's own
+leading whitespace so org's element parser keeps the RESULTS block
+associated with the preceding src block (indentation mismatch makes
+org treat the link as body text and skip inline display)."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (save-excursion
+        (goto-char beg-block)
+        ;; Capture the indentation of the `#+BEGIN_SRC' line so the
+        ;; RESULTS stanza can match it.
+        (let ((indent (buffer-substring-no-properties
+                       (line-beginning-position)
+                       (progn (skip-chars-forward " \t")
+                              (point)))))
+          (when (re-search-forward "^[ \t]*#\\+END_SRC[ \t]*$" nil t)
+            (forward-line 1)
+            (let ((after-end (point)))
+              (while (looking-at "^[ \t]*$") (forward-line 1))
+              (unless (looking-at "^[ \t]*#\\+RESULTS:")
+                (goto-char after-end)
+                (let ((inhibit-modification-hooks t))
+                  (insert "\n" indent "#+RESULTS:\n"
+                          indent "[[file:" target-file "]]\n"))))))))))
+
+(defun claude-collab--render-plantuml-async (body target-file buf beg hash)
+  "Render plantuml BODY into TARGET-FILE in a background process.
+TARGET-FILE is resolved relative to BUF's `default-directory'. BEG /
+HASH identify the src block for hash bookkeeping: hash is only
+stamped on success, so a failed render will be retried on the next
+scheduler tick. Errors surface in the echo area with plantuml's
+stderr — no silent drops."
+  (let* ((plantuml (executable-find "plantuml")))
+    (if (not plantuml)
+        (progn
+          (message "claude-collab: `plantuml' not on exec-path; skipping async render")
+          (claude-collab--auto-render-record-failure buf beg hash))
+      (let* ((abs-target (expand-file-name
+                          target-file
+                          (with-current-buffer buf default-directory)))
+             (outdir     (file-name-directory abs-target))
+             (stem       (file-name-sans-extension abs-target))
+             ;; Give the .puml temp file the same basename as the .png
+             ;; target so plantuml writes `<stem>.png' into OUTDIR,
+             ;; which is exactly TARGET-FILE.
+             (puml-file  (concat stem ".puml"))
+             (stderr-buf (generate-new-buffer " *cc-plantuml-stderr*")))
+        (make-directory outdir t)
+        (with-temp-file puml-file (insert body))
+        (make-process
+         :name (format "cc-plantuml-%s" (file-name-nondirectory abs-target))
+         :noquery t
+         :command (list plantuml "-tpng" "-o" outdir puml-file)
+         :stderr stderr-buf
+         :sentinel
+         (lambda (proc _event)
+           (when (memq (process-status proc) '(exit signal))
+             (unwind-protect
+                 (if (zerop (process-exit-status proc))
+                     (progn
+                       (claude-collab--auto-render-record-success buf beg hash)
+                       (claude-collab--ensure-result-link
+                        buf beg target-file)
+                       (when (buffer-live-p buf)
+                         (with-current-buffer buf
+                           ;; Same target path → Emacs caches the old
+                           ;; bitmap. Invalidate just that file (not
+                           ;; the whole cache) before redisplay.
+                           (clear-image-cache abs-target)
+                           (org-redisplay-inline-images))))
+                   (claude-collab--auto-render-record-failure buf beg hash)
+                   (message "claude-collab: plantuml failed (%s): %s"
+                            (process-exit-status proc)
+                            (with-current-buffer stderr-buf
+                              (string-trim (buffer-string)))))
+               (ignore-errors (delete-file puml-file))
+               (when (buffer-live-p stderr-buf)
+                 (kill-buffer stderr-buf))))))))))
+
 (defun claude-collab--auto-render-now (&optional target-buffer)
-  "Execute every whitelisted diagram block whose body changed since last render.
-Optional TARGET-BUFFER defaults to the current buffer."
+  "Re-render every whitelisted diagram block whose body changed.
+Plantuml blocks run async via `make-process' so Emacs stays
+responsive; dot/ditaa/mermaid fall back to the synchronous babel
+path. The hash map is only updated on success, so a failed render
+(e.g. missing plantuml binary, invalid syntax) will be retried the
+next time the idle timer fires. Optional TARGET-BUFFER defaults to
+the current buffer."
   (let ((buf (or target-buffer (current-buffer))))
     (when (and (buffer-live-p buf)
                (not claude-collab--auto-render-running))
       (with-current-buffer buf
         (when (derived-mode-p 'org-mode)
           (let ((claude-collab--auto-render-running t)
-                (org-confirm-babel-evaluate nil)
-                (any-rendered nil))
+                (org-confirm-babel-evaluate nil))
             (save-excursion
               (org-babel-map-src-blocks nil
                 (when (member lang claude-collab-auto-render-diagrams-languages)
@@ -1283,15 +1398,26 @@ Optional TARGET-BUFFER defaults to the current buffer."
                          (current-hash (and target (md5 (or body ""))))
                          (last-hash (and target
                                          (alist-get beg-block
-                                                    claude-collab--auto-render-hashes))))
-                    (when (and target (not (equal current-hash last-hash)))
-                      (ignore-errors (org-babel-execute-src-block))
-                      (setf (alist-get beg-block
-                                       claude-collab--auto-render-hashes)
-                            current-hash)
-                      (setq any-rendered t))))))
-            (when any-rendered
-              (org-display-inline-images nil t))))))))
+                                                    claude-collab--auto-render-hashes)))
+                         (in-flight-key (cons beg-block current-hash)))
+                    (when (and target
+                               (not (equal current-hash last-hash))
+                               (not (member in-flight-key
+                                            claude-collab--auto-render-in-flight)))
+                      (push in-flight-key claude-collab--auto-render-in-flight)
+                      (if (string= lang "plantuml")
+                          (claude-collab--render-plantuml-async
+                           body target buf beg-block current-hash)
+                        (condition-case err
+                            (progn
+                              (org-babel-execute-src-block)
+                              (claude-collab--auto-render-record-success
+                               buf beg-block current-hash))
+                          (error
+                           (claude-collab--auto-render-record-failure
+                            buf beg-block current-hash)
+                           (message "claude-collab: %s render failed: %s"
+                                    lang (error-message-string err))))))))))))))))
 
 (defun claude-collab--auto-render-schedule (&rest _)
   "`after-change-functions' hook: (re)start the idle timer."
@@ -1315,9 +1441,16 @@ re-rendered.  Inline image previews refresh automatically."
           (setq claude-collab--auto-render-hashes nil))
         (add-hook 'after-change-functions
                   #'claude-collab--auto-render-schedule nil t)
+        ;; Save is a deterministic second chance — if the user saves
+        ;; inside the idle window, re-arm the timer so the block
+        ;; actually renders.
+        (add-hook 'after-save-hook
+                  #'claude-collab--auto-render-schedule nil t)
         ;; Also render once on mode-entry so already-present blocks pick up.
         (claude-collab--auto-render-schedule))
     (remove-hook 'after-change-functions
+                 #'claude-collab--auto-render-schedule t)
+    (remove-hook 'after-save-hook
                  #'claude-collab--auto-render-schedule t)
     (when (timerp claude-collab--auto-render-timer)
       (cancel-timer claude-collab--auto-render-timer)
