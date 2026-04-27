@@ -243,6 +243,284 @@ externally. Return non-nil when we handled the link."
     (spacemacs/set-leader-keys-for-major-mode
       'org-mode "v" #'my/org-image-popup-at-point)))
 
+;; ----------------------------------------------------------------------------
+;; Org rendering — "Editorial Monospace"
+;; ----------------------------------------------------------------------------
+;; The buffer should read like a well-set magazine page in one monospace
+;; typeface. Hierarchy comes from weight, size, italic, and solarized's own
+;; outline palette — never from boxes, pills, or ornamental bullets. Every
+;; face tweak here inherits from theme faces so solarized-light and
+;; solarized-dark stay coherent without a single hardcoded color.
+;;
+;; org-superstar is deliberately disabled: arbitrary unicode-per-level was
+;; the source of the "random bullets" feel. Stars are hidden; levels are
+;; distinguished by size+weight and carried by `outline-N' colors.
+
+;; org-modern: pills ON for tags, timestamps, TODO, priority. The underlying
+;; `org-modern-label' face is restyled below to draw pills from solarized's
+;; own `secondary-selection' band (base2 in light, base02 in dark) so the
+;; look is coherent across themes without hardcoding a single color.
+(with-eval-after-load 'org-modern
+  (setq org-modern-star nil
+        ;; org-modern's own star-hiding options are broken for us:
+        ;;  `t'       uses `invisible' property -> breaks outline-on-heading-p
+        ;;            (TAB cycle fails with "Before first headline").
+        ;;  'leading  only hides all-but-last star; user wants ALL hidden.
+        ;; We disable org-modern's hiding and do it ourselves via `display'
+        ;; property below (`my/org-hide-stars-via-display').
+        org-modern-hide-stars nil
+        org-modern-todo t
+        org-modern-priority t
+        org-modern-timestamp t
+        org-modern-tag nil                ; tags are italic-shadow marginalia
+        org-modern-table t
+        org-modern-block-name t
+        org-modern-keyword "› "
+        org-modern-horizontal-rule "─"
+        org-modern-list '((?+ . "–")
+                          (?- . "–")
+                          (?* . "•"))
+        org-modern-checkbox '((?X . "☑")     ; ballot check for done
+                              (?- . "◐")     ; half-filled for partial
+                              (?\s . "☐"))))  ; empty ballot for unchecked
+
+(add-hook 'org-mode-hook #'org-modern-mode)
+(with-eval-after-load 'org-agenda
+  (add-hook 'org-agenda-finalize-hook #'org-modern-agenda))
+(remove-hook 'org-mode-hook #'org-superstar-mode)
+
+;; --- Editorial face system --------------------------------------------------
+;; Everything below is re-applied after any theme switch (solarized-light
+;; and solarized-dark are both enabled; swapping them re-evaluates faces).
+(setq org-tags-column -80
+      ;; Enable distinct faces for quote and verse blocks so we can style
+      ;; them separately from regular src/example blocks.
+      org-fontify-quote-and-verse-blocks t
+      ;; Off: we hide stars via `display' property below, not via org's
+      ;; bg-colored-star mechanism.
+      org-hide-leading-stars nil)
+
+;; Hide ALL heading stars via `display' property. Using `display' rather
+;; than `invisible' is deliberate: `outline-on-heading-p' treats
+;; invisible-line-start as "not a heading", which cascades into
+;; `org-back-to-heading' failing and `org-cycle' erroring with
+;; "Before first headline". `display' only affects rendering, not org's
+;; view of the buffer — TAB folding, agenda, and outline navigation all
+;; keep working while the stars stay invisible to the eye.
+(defun my/org-hide-stars-via-display ()
+  "Install a font-lock rule that replaces heading stars with empty display."
+  (font-lock-add-keywords
+   nil
+   '(("^\\(\\*+\\) " (1 '(face nil display "") prepend)))
+   'append)
+  (font-lock-flush))
+(add-hook 'org-mode-hook #'my/org-hide-stars-via-display)
+
+;; Auto-reveal raw markup on the line at point. Strips every `display'
+;; text property on the current line so stars, chips (TODO/DONE/priority/
+;; dates), and checkboxes render as raw source text while you're editing
+;; them. The previously revealed line is re-fontified via `font-lock-flush'
+;; which re-applies org-modern's chip rendering and our star-hiding rule.
+;;
+;; This is a general mechanism — it handles everything org-modern hides
+;; via `display', not just stars. Overhead per command: equality check
+;; + at most one `font-lock-flush' (cheap, marks-only) + one
+;; `remove-text-properties' call on a single line.
+(defvar-local my/org--revealed-line nil
+  "(BEG . END) of the line whose markup is currently revealed, or nil.")
+
+(defun my/org-reveal-markup-on-line ()
+  "Reveal raw markup on current line; re-hide on previously revealed line."
+  (when (derived-mode-p 'org-mode)
+    (let ((curr (cons (line-beginning-position) (line-end-position)))
+          (prev my/org--revealed-line))
+      (unless (equal prev curr)
+        (with-silent-modifications
+          (when (and prev
+                     (<= (point-min) (car prev))
+                     (<= (cdr prev) (point-max)))
+            (font-lock-flush (car prev) (cdr prev)))
+          (remove-text-properties (car curr) (cdr curr) '(display nil)))
+        (setq my/org--revealed-line curr)))))
+
+(defun my/org-setup-auto-reveal ()
+  "Install the buffer-local post-command hook for markup auto-reveal."
+  (add-hook 'post-command-hook #'my/org-reveal-markup-on-line nil 'local))
+(add-hook 'org-mode-hook #'my/org-setup-auto-reveal)
+
+;; Auto-update `[N/M]' checkbox cookies on direct edits. Org only updates
+;; cookies when you toggle via commands like `C-c C-c'; with raw-reveal
+;; enabled the natural workflow is to flip `[ ]' to `[X]' with the cursor,
+;; which doesn't trigger any org command. This `after-change-functions'
+;; hook detects checkbox-line edits and refreshes the nearest cookie.
+(defun my/org-maybe-update-checkbox-cookies (beg _end _len)
+  "If a change happened on a checkbox line, update the nearest `[N/M]' cookie."
+  (when (and (derived-mode-p 'org-mode)
+             (not undo-in-progress))
+    (save-excursion
+      (goto-char beg)
+      (beginning-of-line)
+      (when (looking-at-p "[ \t]*[-+*][ \t]+\\[[ X-]\\]")
+        (save-match-data
+          (ignore-errors
+            (org-update-statistics-cookies nil)))))))
+
+(defun my/org-setup-checkbox-cookie-updater ()
+  (add-hook 'after-change-functions #'my/org-maybe-update-checkbox-cookies nil 'local))
+(add-hook 'org-mode-hook #'my/org-setup-checkbox-cookie-updater)
+
+(defun my/org-faces-apply (&rest _)
+  "Apply the Editorial Monospace face theme to org-mode.
+
+Design — \"Two States\": one chip family, two visual weights.
+  ACTIVE = bold default-foreground on chip band (TODO, priority, active dates).
+  PAST   = italic shadow-foreground on chip band (DONE, inactive dates).
+Tags leave the chip family entirely — they render as italic-shadow
+marginalia via the native `org-tag' face.
+
+Chip palette is derived from theme faces (`secondary-selection' for the
+chip band, `shadow' for muted text, `default' for active text), so no
+colors are hardcoded and the look tracks whichever solarized variant is
+active. Re-called on every theme switch via `enable-theme-functions'.
+
+Each chip face sets `:background' and `:foreground' EXPLICITLY — org-modern's
+own deffaces bake in `gray20'/`gray90' bgs via display-matched specs that
+override bare `:inherit'. `:box' is left untouched so `org-modern' can
+manage its dynamic padding+bg-color rendering."
+  (let* ((chip-bg (or (face-background 'secondary-selection nil 'default)
+                      (face-background 'default)))
+         (chip-fg-muted (or (face-foreground 'shadow nil 'default)
+                            (face-foreground 'default)))
+         (chip-fg-bold  (or (face-foreground 'default)
+                            chip-fg-muted))
+         ;; Accent color for block top-rail and the occasional signature
+         ;; highlight. `link' face is themed consistently by solarized.
+         (accent        (or (face-foreground 'link nil 'default)
+                            chip-fg-bold)))
+    ;; Parent label face — height only; org-modern owns `:box'.
+    (set-face-attribute 'org-modern-label nil
+                        :background chip-bg :foreground chip-fg-muted
+                        :weight 'normal :slant 'normal
+                        :height 0.95 :inherit 'default)
+    ;; PAST — italic shadow on chip band.
+    (dolist (f '(org-modern-done org-modern-date-inactive org-modern-time-inactive))
+      (set-face-attribute f nil :inherit 'org-modern-label
+                          :background chip-bg :foreground chip-fg-muted
+                          :slant 'italic :weight 'normal
+                          :inverse-video nil :underline nil))
+    ;; ACTIVE — bold default fg on chip band.
+    (dolist (f '(org-modern-date-active org-modern-time-active))
+      (set-face-attribute f nil :inherit 'org-modern-label
+                          :background chip-bg :foreground chip-fg-bold
+                          :slant 'normal :weight 'normal
+                          :inverse-video nil :underline nil))
+    (set-face-attribute 'org-modern-todo nil :inherit 'org-modern-label
+                        :background chip-bg :foreground chip-fg-bold
+                        :slant 'normal :weight 'bold
+                        :inverse-video nil :underline nil)
+    (set-face-attribute 'org-modern-priority nil :inherit 'org-modern-label
+                        :background chip-bg :foreground chip-fg-bold
+                        :slant 'normal :weight 'bold
+                        :inverse-video nil :underline nil)
+    ;; TAGS — italic-shadow marginalia; no chip.
+    (set-face-attribute 'org-tag nil
+                        :inherit 'shadow
+                        :slant 'italic :weight 'normal
+                        :box nil :background 'unspecified
+                        :foreground 'unspecified)
+  ;; org-modern caches label text-properties at font-lock time; after
+  ;; face changes we must bounce the mode so labels repaint.
+  (dolist (buf (buffer-list))
+    (with-current-buffer buf
+      (when (and (derived-mode-p 'org-mode)
+                 (bound-and-true-p org-modern-mode))
+        (org-modern-mode -1)
+        (org-modern-mode 1)
+        (font-lock-flush))))
+
+  ;; --- Heading hierarchy: graduated size + weight ---------------------------
+  (set-face-attribute 'org-document-title nil :height 1.60 :weight 'bold)
+  (set-face-attribute 'org-level-1 nil :height 1.35 :weight 'bold)
+  (set-face-attribute 'org-level-2 nil :height 1.18 :weight 'semi-bold)
+  (set-face-attribute 'org-level-3 nil :height 1.08 :weight 'regular)
+  (set-face-attribute 'org-level-4 nil :height 1.00 :weight 'regular :slant 'italic)
+  (set-face-attribute 'org-level-5 nil :height 1.00 :weight 'regular :slant 'italic)
+  (set-face-attribute 'org-level-6 nil :height 1.00 :weight 'regular :slant 'italic)
+
+  ;; --- Plain-text timestamps outside org-modern's reach (agenda, etc.) ------
+  (set-face-attribute 'org-date nil
+                      :inherit 'shadow :slant 'italic
+                      :underline nil :foreground 'unspecified)
+
+  ;; --- Meta lines and block captions (recede) -------------------------------
+  (set-face-attribute 'org-meta-line nil
+                      :inherit 'shadow :slant 'italic :height 0.95)
+  (set-face-attribute 'org-document-info nil :inherit 'default)
+  (set-face-attribute 'org-document-info-keyword nil
+                      :inherit 'shadow :height 0.90)
+  ;; --- Blocks: "Callout Rail" ----------------------------------------------
+  ;; Subtle tonal band (chip-bg) + accent-colored overline on the opening
+  ;; caption as a signature top rail. End line gets a quiet shadow underline
+  ;; for closure. The accent-rail is the only strong signal in the block —
+  ;; everything else stays muted so code/prose inside can breathe.
+  (let ((block-bg chip-bg))
+    (set-face-attribute 'org-block nil
+                        :inherit 'default
+                        :background block-bg
+                        :extend t)
+    (set-face-attribute 'org-block-begin-line nil
+                        :inherit 'default
+                        :foreground chip-fg-muted
+                        :background block-bg
+                        :weight 'semi-bold :slant 'normal
+                        :height 0.82
+                        :overline accent
+                        :extend t)
+    (set-face-attribute 'org-block-end-line nil
+                        :inherit 'default
+                        :foreground chip-fg-muted
+                        :background block-bg
+                        :weight 'semi-bold :slant 'normal
+                        :height 0.82
+                        :underline (list :color chip-fg-muted
+                                         :style 'line :position 0)
+                        :extend t)
+    (when (facep 'org-quote)
+      (set-face-attribute 'org-quote nil
+                          :inherit '(italic org-block)
+                          :extend t))
+    (when (facep 'org-verse)
+      (set-face-attribute 'org-verse nil
+                          :inherit '(italic org-block)
+                          :weight 'light
+                          :extend t)))
+
+  ;; --- Tables: readable grid ------------------------------------------------
+  ;; Drop the solarized-default green verticals to shadow so separators
+  ;; recede. Header row (when Emacs' `org-table-header' face is available)
+  ;; becomes bold with a thin accent underline so "header vs body" reads
+  ;; at a glance without adding any backgrounds.
+  (set-face-attribute 'org-table nil
+                      :inherit 'default
+                      :foreground chip-fg-muted)
+  ;; Header row: bold + accent underline. Rhymes with block top-rails —
+  ;; accent *above* a block, accent *below* a table header. One accent,
+  ;; two mirrored positions, used only where a boundary needs signaling.
+  (when (facep 'org-table-header)
+    (set-face-attribute 'org-table-header nil
+                        :inherit 'default
+                        :weight 'bold
+                        :underline (list :color accent
+                                         :style 'line :position 0)
+                        :background 'unspecified))))
+
+;; Apply now and on every subsequent theme switch. APPEND=t so we run
+;; *after* solarized's own `solarized--set-current' bookkeeper on each
+;; theme enable, ensuring our overrides are the final word on chip faces.
+(with-eval-after-load 'org-modern
+  (my/org-faces-apply))
+(add-hook 'enable-theme-functions #'my/org-faces-apply t)
+
 ;; Markdown: nice in-buffer previews via xwidget-webkit
 (with-eval-after-load 'markdown-mode
   (setq markdown-fontify-code-blocks-natively t
@@ -653,6 +931,38 @@ Navigate          Stage/Commit       Remote            Branches & Logs    Forge 
                 (or (and (fboundp 'projectile-project-root)
                          (ignore-errors (projectile-project-root)))
                     (funcall orig)))))
+
+;; Expose xref / imenu / tree-sitter / project-info as MCP tools under the
+;; `mcp__emacs-tools__' prefix so Claude has real IDE navigation instead of
+;; grep. Diagnostics (`getDiagnostics') are already exposed by the base
+;; claude-code-ide handlers.
+(setq claude-code-ide-enable-mcp-server t)
+(with-eval-after-load 'claude-code-ide
+  (claude-code-ide-emacs-tools-setup))
+
+
+;; Dev iteration: reload every .el under ~/.spacemacs.d/lisp/ (except tests)
+;; so edits to claude-collab.el, monday-docs-sync.el, user-config.el, etc.
+;; take effect without a full Emacs restart.
+(defun my/reload-custom-lisp ()
+  "Reload every .el file under ~/.spacemacs.d/lisp/ except *-test.el."
+  (interactive)
+  (let ((dir (expand-file-name "~/.spacemacs.d/lisp"))
+        (loaded 0) (failed nil))
+    (dolist (file (directory-files dir t "\\.el\\'"))
+      (unless (string-match-p "-test\\.el\\'" file)
+        (condition-case err
+            (progn (load-file file) (cl-incf loaded))
+          (error (push (cons (file-name-nondirectory file) err) failed)))))
+    (if failed
+        (message "Reloaded %d; %d failed — first: %s: %s"
+                 loaded (length failed)
+                 (caar failed) (error-message-string (cdar failed)))
+      (message "Reloaded %d custom lisp files ✓" loaded))))
+
+(global-set-key (kbd "<f5>") #'my/reload-custom-lisp)
+(when (fboundp 'spacemacs/set-leader-keys)
+  (spacemacs/set-leader-keys "fel" #'my/reload-custom-lisp))
 
 (provide 'user-config)
 ;;; user-config.el ends here

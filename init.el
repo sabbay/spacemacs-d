@@ -87,6 +87,7 @@ This function should only modify configuration layer settings."
      yaml-mode
      plantuml-mode
      plz
+     org-modern
      (org-excalidraw :location (recipe :fetcher github :repo "wdavew/org-excalidraw")))
 
    ;; A list of packages that cannot be updated.
@@ -617,6 +618,9 @@ This function is called at the very end of Spacemacs initialization."
    ;; If you edit it by hand, you could mess it up, so be careful.
    ;; Your init file should contain only one such instance.
    ;; If there is more than one, they won't work right.
+   '(custom-safe-themes
+     '("2b0fcc7cc9be4c09ec5c75405260a85e41691abb1ee28d29fcd5521e4fca575b"
+       "7fea145741b3ca719ae45e6533ad1f49b2a43bf199d9afaee5b6135fd9e6f9b8" default))
    '(package-selected-packages
      '(ace-link add-node-modules-path aggressive-indent all-the-icons auto-compile
                 auto-highlight-symbol avy-jump-helm-line centered-cursor-mode
@@ -637,17 +641,17 @@ This function is called at the very end of Spacemacs initialization."
                 highlight-indentation highlight-numbers highlight-parentheses
                 hl-todo holy-mode htmlize hungry-delete hybrid-mode impatient-mode
                 indent-guide info+ inspector ivy link-hint lorem-ipsum macrostep
-                multi-line nameless open-junk-file org org-remark org-superstar
-                overseer page-break-lines paradox password-generator pcre2el
-                plantuml-mode plz popwin pug-mode quickrun rainbow-delimiters
-                restart-emacs sass-mode scss-mode slim-mode space-doc spaceline
-                spacemacs-purpose-popwin spacemacs-whitespace-cleanup
-                string-edit-at-point string-inflection swiper symbol-overlay symon
-                tagedit term-cursor toc-org transient treemacs-evil
-                treemacs-icons-dired treemacs-persp treemacs-projectile
-                undo-fu-session uuidgen vi-tilde-fringe volatile-highlights vundo
-                web-completion-data web-mode wgrep winum writeroom-mode ws-butler
-                yaml-mode)))
+                multi-line nameless open-junk-file org org-modern org-remark
+                org-superstar overseer page-break-lines paradox password-generator
+                pcre2el plantuml-mode plz popwin pug-mode quickrun
+                rainbow-delimiters restart-emacs sass-mode scss-mode slim-mode
+                space-doc spaceline spacemacs-purpose-popwin
+                spacemacs-whitespace-cleanup string-edit-at-point
+                string-inflection swiper symbol-overlay symon tagedit term-cursor
+                toc-org transient treemacs-evil treemacs-icons-dired
+                treemacs-persp treemacs-projectile undo-fu-session uuidgen
+                vi-tilde-fringe volatile-highlights vundo web-completion-data
+                web-mode wgrep winum writeroom-mode ws-butler yaml-mode)))
   (custom-set-faces
    ;; custom-set-faces was added by Custom.
    ;; If you edit it by hand, you could mess it up, so be careful.
