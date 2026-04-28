@@ -88,6 +88,7 @@ This function should only modify configuration layer settings."
      plantuml-mode
      plz
      org-modern
+     gcmh
      (org-excalidraw :location (recipe :fetcher github :repo "wdavew/org-excalidraw")))
 
    ;; A list of packages that cannot be updated.
@@ -128,7 +129,10 @@ It should only modify the values of Spacemacs settings."
    ;; Setting this >= 1 MB should increase performance for lsp servers
    ;; in emacs 27.
    ;; (default (* 1024 1024))
-   dotspacemacs-read-process-output-max (* 1024 1024)
+   ;; Bumped from the 1MB default. LSP/gptel responses arrive in much
+   ;; bigger chunks, so 4MB cuts the number of read syscalls on streaming
+   ;; output substantially.
+   dotspacemacs-read-process-output-max (* 4 1024 1024)
 
    ;; If non-nil then Spacelpa repository is the primary source to install
    ;; a locked version of packages. If nil then Spacemacs will install the

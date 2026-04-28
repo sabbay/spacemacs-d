@@ -14,6 +14,11 @@
     (add-to-list 'exec-path-from-shell-variables var))
   (exec-path-from-shell-initialize))
 
+;; Performance tweaks (gcmh, font cache, bidi, so-long, LSP, recentf).
+;; See lisp/perf.el for details and rationale.
+(add-to-list 'load-path (expand-file-name "lisp" dotspacemacs-directory))
+(require 'perf)
+
 ;; Soft-wrap long lines everywhere: prose files, code, logs, shell output.
 ;; Wraps at word boundaries, doesn't modify the file. C-a/C-e respect
 ;; visual lines. Toggle per-buffer with `SPC t l' or `M-x visual-line-mode'.
