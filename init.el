@@ -638,7 +638,7 @@ This function is called at the very end of Spacemacs initialization."
                 evil-matchit evil-mc evil-nerd-commenter evil-numbers
                 evil-surround evil-textobj-line evil-tutor evil-unimpaired
                 evil-visual-mark-mode evil-visualstar exec-path-from-shell
-                expand-region eyebrowse fancy-battery golden-ratio
+                expand-region eyebrowse fancy-battery gcmh golden-ratio
                 google-translate haml-mode helm-ag helm-comint helm-css-scss
                 helm-descbinds helm-make helm-mode-manager helm-org
                 helm-projectile helm-purpose helm-swoop helm-xref hide-comnt
