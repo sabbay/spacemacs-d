@@ -653,6 +653,28 @@ as one JSON object per line — `jq -c' over the file should parse."
             (should (string-suffix-p "\n" content))))
       (delete-file tmp))))
 
+(ert-deftest claude-collab-test-mcp-log-already-resolved-emitted ()
+  "Resolving an unknown id hits the idempotent path and returns
+`(:already-resolved t :id ID)' — the JSONL telemetry must reflect that
+shape, not silently drop the call. Guards the contract that downstream
+consumers (UI, billing, audit) can match on `:already-resolved' to know
+the call was a no-op against a non-existent overlay."
+  (let* ((tmp (make-temp-file "cc-log-already-" nil ".jsonl"))
+         (claude-collab-mcp-log-file tmp))
+    (unwind-protect
+        (progn
+          (claude-collab-clear-log)
+          (let ((result (claude-collab-resolve-annotation-by-id "ghost-id-aaa")))
+            (should (plist-get result :already-resolved))
+            (should (equal "ghost-id-aaa" (plist-get result :id))))
+          (let ((content (with-temp-buffer
+                           (insert-file-contents tmp)
+                           (buffer-string))))
+            (should (string-match-p "\"tool\":\"resolve-annotation\"" content))
+            (should (string-match-p ":already-resolved" content))
+            (should (string-match-p "ghost-id-aaa" content))))
+      (delete-file tmp))))
+
 (ert-deftest claude-collab-test-mcp-log-suppress-flag ()
   "When `claude-collab--mcp-log-suppress' is t, no entry lands. Used by
 revert-session to avoid recording its own delete/insert sweeps as fresh
