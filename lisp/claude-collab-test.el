@@ -582,6 +582,51 @@ with no diagnostic."
       (should (plist-get result :error))
       (should (string-match-p "begin (10) > end (5)" (plist-get result :error))))))
 
+(ert-deftest claude-collab-test-error-codes-apply-edit ()
+  "Every `apply-edit' failure mode carries a typed `:code' keyword
+the agent can dispatch on without substring-matching the message."
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-temp-file buf file
+    ;; bad-arg: nil new-text
+    (let ((r (claude-collab-apply-edit file 1 5 nil)))
+      (should (eq :bad-arg (plist-get r :code))))
+    ;; bad-arg: non-integer positions
+    (let ((r (claude-collab-apply-edit file "x" 5 "y")))
+      (should (eq :bad-arg (plist-get r :code))))
+    ;; invalid-range: begin > end
+    (let ((r (claude-collab-apply-edit file 10 5 "y")))
+      (should (eq :invalid-range (plist-get r :code))))
+    ;; out-of-bounds: end past point-max
+    (let* ((pmax (with-current-buffer buf (point-max)))
+           (r (claude-collab-apply-edit file 1 (+ pmax 100) "y")))
+      (should (eq :out-of-bounds (plist-get r :code))))
+    ;; buffer-not-open
+    (let ((r (claude-collab-apply-edit "/no/such/file/anywhere.txt" 1 5 "y")))
+      (should (eq :buffer-not-open (plist-get r :code))))))
+
+(ert-deftest claude-collab-test-error-codes-apply-annotation ()
+  "Same contract for `apply-annotation' — every failure path carries
+a typed `:code'."
+  (claude-collab-test--reset-state)
+  ;; not-found
+  (let ((r (claude-collab-apply-annotation "ghost-id-xyz" :replace "x")))
+    (should (eq :not-found (plist-get r :code)))))
+
+(ert-deftest claude-collab-test-error-codes-apply-batch ()
+  "`apply-batch' enforces typed codes for shape errors before delegating."
+  (claude-collab-test--reset-state)
+  ;; bad-arg: edits not a list
+  (let ((r (claude-collab-apply-batch "not-a-list")))
+    (should (eq :bad-arg (plist-get r :code))))
+  ;; bad-arg: missing :id in entry
+  (let* ((r (claude-collab-apply-batch '((:action :replace :new-text "x"))))
+         (entry (car (plist-get r :results))))
+    (should (eq :bad-arg (plist-get entry :code))))
+  ;; bad-arg: missing :action in entry
+  (let* ((r (claude-collab-apply-batch '((:id "x" :new-text "y"))))
+         (entry (car (plist-get r :results))))
+    (should (eq :bad-arg (plist-get entry :code)))))
+
 (ert-deftest claude-collab-test-apply-edit-out-of-bounds ()
   "apply-edit returns :error when the range exceeds buffer bounds."
   (claude-collab-test--reset-state)

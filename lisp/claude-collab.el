@@ -681,22 +681,25 @@ as breadcrumbs for postmortem grep over the JSONL log."
            (found (claude-collab--find-annotation id)))
       (cond
        ((not found)
-        (list :error (format "Annotation not found: %s" id)))
+        (list :error (format "Annotation not found: %s" id) :code :not-found))
        (t
         (let* ((buf (car found))
                (ov (cdr found))
                (file (buffer-file-name buf)))
           (cond
            ((not (buffer-live-p buf))
-            (list :error (format "File not open in Emacs: %s" file)))
+            (list :error (format "File not open in Emacs: %s" file)
+                  :code :buffer-not-open))
            ((and (memq action '(:replace :insert-before :insert-after))
                  (not (stringp new-text)))
-            (list :error (format "Action %s requires :new-text" action)))
+            (list :error (format "Action %s requires :new-text" action)
+                  :code :bad-arg))
            ((and (memq action '(:insert-before :insert-after))
                  (not (eq unit :annotation)))
             (list :error
                   (format "Unit %s is not allowed for %s — insertion uses the raw overlay edge"
-                          unit action)))
+                          unit action)
+                  :code :unit-not-allowed))
            (t
             (condition-case err
                 (let* (region-beg region-end new-begin new-end
@@ -761,7 +764,8 @@ as breadcrumbs for postmortem grep over the JSONL log."
                            :resolved resolved)
                      (and resolve-error (list :resolve-error resolve-error))
                      (and pre-edit (list :pre-edit pre-edit)))))
-              (error (list :error (error-message-string err))))))))))))
+              (error (list :error (error-message-string err)
+                           :code :unknown)))))))))))
 
 (defun claude-collab--pre-edit-fingerprint (id ov buf)
   "Snapshot what the overlay covers right before the edit lands.
@@ -900,21 +904,24 @@ Notes on specific units:
            (found (claude-collab--find-annotation id)))
       (cond
        ((not found)
-        (list :error (format "Annotation not found: %s" id)))
+        (list :error (format "Annotation not found: %s" id) :code :not-found))
        (t
         (let* ((buf (car found))
                (ov (cdr found))
                (file (buffer-file-name buf)))
           (cond
            ((not (buffer-live-p buf))
-            (list :error (format "File not open in Emacs: %s" file)))
+            (list :error (format "File not open in Emacs: %s" file)
+                  :code :buffer-not-open))
            (t
             (condition-case err
                 (with-current-buffer buf
                   (let ((bounds (claude-collab--bounds-for-unit ov unit)))
                     (list :ok t :begin (car bounds) :end (cdr bounds))))
-              (user-error (list :error (error-message-string err)))
-              (error (list :error (error-message-string err))))))))))))
+              (user-error (list :error (error-message-string err)
+                                :code :bad-action))
+              (error (list :error (error-message-string err)
+                           :code :unknown)))))))))))
 
 (defun claude-collab-apply-edit (file begin end new-text)
   "Replace FILE's BEGIN..END region with NEW-TEXT and save.
@@ -930,23 +937,27 @@ not integers, the range is inverted, or the range is out of bounds."
                                                      (min 80 (length new-text)))))
     (cond
      ((not (stringp new-text))
-      (list :error "new-text must be a string"))
+      (list :error "new-text must be a string" :code :bad-arg))
      ((not (and (integerp begin) (integerp end)))
-      (list :error "Invalid position: begin and end must be integers"))
+      (list :error "Invalid position: begin and end must be integers"
+            :code :bad-arg))
      (t
       (let ((buf (find-buffer-visiting file)))
         (cond
          ((not (buffer-live-p buf))
-          (list :error (format "File not open in Emacs: %s" file)))
+          (list :error (format "File not open in Emacs: %s" file)
+                :code :buffer-not-open))
          ((> begin end)
-          (list :error (format "Invalid range: begin (%d) > end (%d)" begin end)))
+          (list :error (format "Invalid range: begin (%d) > end (%d)" begin end)
+                :code :invalid-range))
          (t
           (with-current-buffer buf
             (let ((pmin (point-min)) (pmax (point-max)))
               (cond
                ((or (< begin pmin) (> end pmax))
                 (list :error (format "Range %d..%d out of bounds (%d..%d)"
-                                     begin end pmin pmax)))
+                                     begin end pmin pmax)
+                      :code :out-of-bounds))
                (t
                 (claude-collab--edit-region buf begin end new-text)
                 (list :ok t
@@ -974,7 +985,7 @@ RESULTS is the apply-annotation result with :id prepended for matching."
                                                        edits)))
     (cond
      ((not (listp edits))
-      (list :error "edits must be a list"))
+      (list :error "edits must be a list" :code :bad-arg))
      (t
       (let ((results nil)
             (applied 0)
@@ -987,11 +998,14 @@ RESULTS is the apply-annotation result with :id prepended for matching."
                             (new-text (claude-collab-core-batch-edit-arg edit :new-text))
                             (unit (claude-collab-core-batch-edit-arg edit :unit)))
                         (cond
-                         ((null id) (list :error "Missing :id in edit"))
-                         ((null action) (list :error "Missing :action in edit"))
+                         ((null id) (list :error "Missing :id in edit"
+                                           :code :bad-arg))
+                         ((null action) (list :error "Missing :action in edit"
+                                              :code :bad-arg))
                          (t (claude-collab-apply-annotation
                              id action new-text unit))))
-                    (error (list :error (error-message-string err)))))
+                    (error (list :error (error-message-string err)
+                                 :code :unknown))))
                  (annotated (append (list :id id) raw)))
             (if (plist-get raw :ok)
                 (cl-incf applied)
