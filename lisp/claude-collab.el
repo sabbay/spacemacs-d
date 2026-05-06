@@ -1058,18 +1058,35 @@ Notes on specific units:
               (error (list :error (error-message-string err)
                            :code :unknown)))))))))))
 
-(defun claude-collab-apply-edit (file begin end new-text)
+(defun claude-collab-apply-edit (file begin end new-text &optional expected-text)
   "Replace FILE's BEGIN..END region with NEW-TEXT and save.
 BEGIN == END means insert at that point. NEW-TEXT must be a string
-(may be empty — explicit deletion). Returns (:ok t :new-begin N
-:new-end M) or (:error MSG) if the file is not open, BEGIN/END are
-not integers, the range is inverted, or the range is out of bounds."
+\(may be empty — explicit deletion).
+
+EXPECTED-TEXT (optional but recommended): if provided, the function
+verifies that BEGIN..END in the live buffer currently contains
+exactly EXPECTED-TEXT before mutating; mismatch returns
+\(:error :code :drift :actual-prefix S :expected-prefix S) without
+touching the buffer. This is the same fingerprint guard
+`apply-annotation' enforces structurally — apply-edit takes raw byte
+positions which makes it the path the original `:verify:'-line splice
+took (an `eval-elisp' agent computing positions from a stale
+`list-annotations' result, then handing them in here). Pass it.
+
+Returns (:ok t :new-begin N :new-end M) on success, or
+\(:error MSG :code KW [...] ) on any failure. KW is one of:
+`:bad-arg', `:buffer-not-open', `:invalid-range', `:out-of-bounds',
+`:drift'."
   (claude-collab--with-mcp-log "apply-edit"
                                (list :file file :begin begin :end end
                                      :new-text-prefix
                                      (and (stringp new-text)
                                           (substring new-text 0
-                                                     (min 80 (length new-text)))))
+                                                     (min 80 (length new-text))))
+                                     :expected-text-prefix
+                                     (and (stringp expected-text)
+                                          (substring expected-text 0
+                                                     (min 80 (length expected-text)))))
     (cond
      ((not (stringp new-text))
       (list :error "new-text must be a string" :code :bad-arg))
@@ -1093,6 +1110,20 @@ not integers, the range is inverted, or the range is out of bounds."
                 (list :error (format "Range %d..%d out of bounds (%d..%d)"
                                      begin end pmin pmax)
                       :code :out-of-bounds))
+               ((and (stringp expected-text)
+                     (let ((actual (buffer-substring-no-properties begin end)))
+                       (not (string= actual expected-text))))
+                (let* ((actual (buffer-substring-no-properties begin end))
+                       (cap 200))
+                  (list :error
+                        (format "Expected-text mismatch at %d..%d in %s — buffer drifted"
+                                begin end (buffer-name buf))
+                        :code :drift
+                        :actual-prefix
+                        (substring actual 0 (min cap (length actual)))
+                        :expected-prefix
+                        (substring expected-text 0
+                                   (min cap (length expected-text))))))
                (t
                 (claude-collab--edit-region buf begin end new-text)
                 (list :ok t
@@ -1385,16 +1416,19 @@ Required keys in ARGS: :id, :action. Optional: :new-text, :unit."
     (claude-collab-core-prin1 (claude-collab-get-region-bounds id unit))))
 
 (defun claude-collab--mcp-apply-edit (args)
-  "MCP handler: apply a dumb buffer edit between BEGIN and END."
+  "MCP handler: apply a buffer edit between BEGIN and END.
+Optional EXPECTED-TEXT triggers the drift fingerprint guard."
   (let ((file (claude-collab--mcp-arg args 'file))
         (begin (claude-collab--mcp-arg args 'begin))
         (end (claude-collab--mcp-arg args 'end))
-        (new-text (claude-collab--mcp-arg args 'new-text)))
+        (new-text (claude-collab--mcp-arg args 'new-text))
+        (expected-text (claude-collab--mcp-arg args 'expected-text)))
     (unless file (error "Missing required arg: file"))
     (unless (integerp begin) (error "Missing or non-integer arg: begin"))
     (unless (integerp end) (error "Missing or non-integer arg: end"))
     (unless (stringp new-text) (error "Missing required arg: new-text"))
-    (claude-collab-core-prin1 (claude-collab-apply-edit file begin end new-text))))
+    (claude-collab-core-prin1
+     (claude-collab-apply-edit file begin end new-text expected-text))))
 
 (defun claude-collab--mcp-get-active-plan (_args)
   "MCP handler: return active plan path (or empty string if none)."
@@ -1493,7 +1527,7 @@ optional :new-text and :unit)."
      (make-mcp-server-tool
       :name "claude-collab-apply-edit"
       :title "Apply Buffer Edit"
-      :description "Low-level buffer edit primitive — replace FILE[BEGIN..END] with NEW-TEXT and save. BEGIN == END inserts. Empty NEW-TEXT deletes. No annotation or structural knowledge."
+      :description "Low-level buffer edit primitive — replace FILE[BEGIN..END] with NEW-TEXT and save. BEGIN == END inserts. Empty NEW-TEXT deletes. Pass expected-text to assert the buffer's current contents at BEGIN..END before mutating: a mismatch returns (:error :code :drift) without touching the file. expected-text is strongly recommended whenever the positions came from anything but a freshly-issued get-region-bounds — that's the structural fix for the original :verify:-line splice."
       :input-schema '((type . "object")
                       (properties . ((file . ((type . "string")
                                                (description . "Absolute file path of an open buffer.")))
@@ -1502,7 +1536,9 @@ optional :new-text and :unit)."
                                      (end . ((type . "integer")
                                               (description . "Buffer position where the edit ends. Equal to begin means insert at that point.")))
                                      (new-text . ((type . "string")
-                                                   (description . "Replacement text. May be empty for explicit deletion.")))))
+                                                   (description . "Replacement text. May be empty for explicit deletion.")))
+                                     (expected-text . ((type . "string")
+                                                        (description . "Optional drift guard. If provided, the buffer at BEGIN..END must match this string exactly or the edit aborts with :code :drift.")))))
                       (required . ("file" "begin" "end" "new-text")))
       :annotations '((destructiveHint . t))
       :function #'claude-collab--mcp-apply-edit))

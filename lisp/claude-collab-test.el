@@ -616,34 +616,13 @@ handler happens to raise."
       (should (string-match-p "ERROR" s))
       (should (string-match-p "kaboom" s)))))
 
-(ert-deftest claude-collab-test-apply-annotation-replace ()
-  "apply-annotation :replace swaps the annotated region and auto-resolves."
-  ;; KNOWN FLAKE: the test fabricates a stub overlay (`--fabricate-overlay-in')
-  ;; that lacks the marginalia file org-remark expects, so on auto-resolve
-  ;; `org-remark-delete' detaches the overlay from the buffer without
-  ;; fully removing it (`#<overlay in no buffer>'). Real-org-remark
-  ;; counterpart `claude-collab-test-apply-annotation-real-org-remark'
-  ;; passes; the stub-overlay path conflates "removed from buffer" with
-  ;; "deleted entirely". Marked :failed so CI green bar is meaningful.
-  :expected-result :failed
-  (claude-collab-test--reset-state)
-  (claude-collab-test--with-temp-file buf _file
-    ;; Highlight "world" (positions 7..12 in "Hello world,...").
-    (let ((id (claude-collab-test--fabricate-overlay-in buf 7 12)))
-      (let ((result (claude-collab-apply-annotation id :replace "there")))
-        (should (plist-get result :ok))
-        (should (= 7 (plist-get result :new-begin)))
-        (should (= 12 (plist-get result :new-end))))
-      (should (string-prefix-p "Hello there,"
-                               (with-current-buffer buf (buffer-string))))
-      ;; Overlay should be gone (resolved).
-      (with-current-buffer buf
-        (should (null (cl-find-if
-                       (lambda (o) (equal (overlay-get o 'org-remark-id) id))
-                       (overlays-in (point-min) (point-max))))))
-      ;; Also safe to skip org-remark-delete gracefully when unavailable;
-      ;; the fabricated overlay is cleaned up via delete-overlay fallback.
-      )))
+;; `claude-collab-test-apply-annotation-replace' was a permanent
+;; `:expected-result :failed' duplicate of
+;; `apply-annotation-real-org-remark' (which passes). Removed —
+;; the stub-overlay path it tested conflated "removed from buffer"
+;; with "deleted entirely" via a quirk in `org-remark-delete' on
+;; fabricated overlays; the real-org-remark counterpart covers
+;; the same code path correctly.
 
 (ert-deftest claude-collab-test-apply-annotation-delete ()
   "apply-annotation :delete removes the annotated region and auto-resolves."
@@ -775,6 +754,102 @@ handler happens to raise."
     (let ((result (claude-collab-apply-edit file 10 5 "x")))
       (should (plist-get result :error))
       (should (string-match-p "begin (10) > end (5)" (plist-get result :error))))))
+
+(ert-deftest claude-collab-test-apply-edit-drift-guard-mismatch ()
+  "When `expected-text' is provided and doesn't match the live buffer,
+`apply-edit' returns :code :drift WITHOUT mutating. The structural
+fix for the original `:verify:'-line splice — agents that compute
+positions from a stale `list-annotations' result and pass them to
+the raw byte-level primitive get a typed refusal instead of corruption."
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-temp-file buf file
+    (let* ((snapshot (with-current-buffer buf (buffer-string)))
+           ;; positions 7..12 = "world" in the default test text
+           (result (claude-collab-apply-edit file 7 12 "MUTATED" "DEFINITELY-NOT-WORLD")))
+      (should (plist-get result :error))
+      (should (eq :drift (plist-get result :code)))
+      (should (equal "world" (plist-get result :actual-prefix)))
+      (should (string-match-p "DEFINITELY-NOT-WORLD" (plist-get result :expected-prefix)))
+      ;; Buffer must be untouched.
+      (should (string= snapshot (with-current-buffer buf (buffer-string)))))))
+
+(ert-deftest claude-collab-test-apply-edit-drift-guard-match ()
+  "When `expected-text' matches, `apply-edit' proceeds normally."
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-temp-file buf file
+    (let ((result (claude-collab-apply-edit file 7 12 "there" "world")))
+      (should (plist-get result :ok))
+      (should (= 7 (plist-get result :new-begin)))
+      (should (= 12 (plist-get result :new-end)))
+      (should (string-prefix-p "Hello there,"
+                               (with-current-buffer buf (buffer-string)))))))
+
+(ert-deftest claude-collab-test-apply-edit-drift-guard-omitted ()
+  "When `expected-text' is nil, the guard is not applied — backward-
+compatible with callers that haven't migrated yet."
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-temp-file buf file
+    (let ((result (claude-collab-apply-edit file 7 12 "there")))
+      (should (plist-get result :ok))
+      (should-not (plist-get result :code)))))
+
+
+;;; --- transactional rollback per action ---
+
+(ert-deftest claude-collab-test-rollback-insert-before ()
+  "`:insert-before' resolve-failure rollback removes the inserted
+text — buffer ends up in pre-edit state. Tests the empty-string
+revert-before-text path which `:replace' doesn't exercise."
+  (skip-unless (fboundp 'org-remark-highlight-mark))
+  (claude-collab-test--with-temp-file buf _file
+    (with-current-buffer buf
+      (org-remark-highlight-mark 7 12 nil nil "x")
+      (save-buffer))
+    (let* ((id (plist-get (car (claude-collab--annotations-in-buffer buf)) :id))
+           (snapshot-before (with-current-buffer buf (buffer-string))))
+      (cl-letf (((symbol-function 'claude-collab-resolve-annotation-by-id)
+                 (lambda (_id) (error "stubbed"))))
+        (let ((result (claude-collab-apply-annotation id :insert-before "PREFIX-")))
+          (should (eq :resolve-failed (plist-get result :code)))
+          (should (string= snapshot-before
+                           (with-current-buffer buf (buffer-string))))
+          (should-not (string-match-p "PREFIX-"
+                                       (with-current-buffer buf (buffer-string)))))))))
+
+(ert-deftest claude-collab-test-rollback-insert-after ()
+  "Same proof for `:insert-after'."
+  (skip-unless (fboundp 'org-remark-highlight-mark))
+  (claude-collab-test--with-temp-file buf _file
+    (with-current-buffer buf
+      (org-remark-highlight-mark 7 12 nil nil "x")
+      (save-buffer))
+    (let* ((id (plist-get (car (claude-collab--annotations-in-buffer buf)) :id))
+           (snapshot-before (with-current-buffer buf (buffer-string))))
+      (cl-letf (((symbol-function 'claude-collab-resolve-annotation-by-id)
+                 (lambda (_id) (error "stubbed"))))
+        (let ((result (claude-collab-apply-annotation id :insert-after "-SUFFIX")))
+          (should (eq :resolve-failed (plist-get result :code)))
+          (should (string= snapshot-before
+                           (with-current-buffer buf (buffer-string)))))))))
+
+(ert-deftest claude-collab-test-rollback-delete ()
+  "`:delete' rollback re-inserts the deleted text. Tests the path
+where revert-before-text holds the original region content."
+  (skip-unless (fboundp 'org-remark-highlight-mark))
+  (claude-collab-test--with-temp-file buf _file
+    (with-current-buffer buf
+      (org-remark-highlight-mark 7 12 nil nil "x")
+      (save-buffer))
+    (let* ((id (plist-get (car (claude-collab--annotations-in-buffer buf)) :id))
+           (snapshot-before (with-current-buffer buf (buffer-string))))
+      (cl-letf (((symbol-function 'claude-collab-resolve-annotation-by-id)
+                 (lambda (_id) (error "stubbed"))))
+        (let ((result (claude-collab-apply-annotation id :delete)))
+          (should (eq :resolve-failed (plist-get result :code)))
+          ;; `world' must be back in the buffer.
+          (should (string= snapshot-before
+                           (with-current-buffer buf (buffer-string)))))))))
+
 
 (ert-deftest claude-collab-test-error-codes-apply-edit ()
   "Every `apply-edit' failure mode carries a typed `:code' keyword
