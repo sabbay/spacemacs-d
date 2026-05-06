@@ -369,6 +369,33 @@ made `--revert-edit' hide its consistency-check skip behind a cond."
     (should-error (claude-collab-edit-resolve-annotation-data text-edit)
                   :type 'wrong-type-argument)))
 
+(ert-deftest claude-collab-test-revert-edit-unknown-variant-signals-conflict ()
+  "A base `claude-collab-edit' instance (neither -text nor -resolve)
+falls into the pcase `_' clause in `--revert-edit' and signals
+`claude-collab-conflict' with an `Unknown edit variant' message.
+Unreachable through the public API today — both producers
+(`--log-edit', `apply-annotation' resolve path) build typed variants —
+but the defensive clause exists, so we test it. If a future producer
+forgets to use a variant constructor, this test catches it."
+  (let ((base (make-claude-collab-edit
+               :buffer (current-buffer) :begin 1 :end 5)))
+    (should-not (claude-collab-edit-text-p base))
+    (should-not (claude-collab-edit-resolve-p base))
+    (let ((err (should-error (claude-collab--revert-edit base)
+                             :type 'claude-collab-conflict)))
+      (should (string-match-p "Unknown edit variant" (cadr err))))))
+
+(ert-deftest claude-collab-test-diff-summary-unknown-variant-string ()
+  "`--diff-summary' on a base-only `claude-collab-edit' returns the
+literal string `unknown edit variant'. Same defensive clause as
+`--revert-edit' but degrades gracefully (string return) rather than
+fail-fast (signal) — callers are UI / log lines, signaling there
+would just blank a status display."
+  (let ((base (make-claude-collab-edit
+               :buffer (current-buffer) :begin 1 :end 5)))
+    (should (string= "unknown edit variant"
+                     (claude-collab--diff-summary base)))))
+
 (ert-deftest claude-collab-test-apply-annotation-pre-edit-fingerprint ()
   "apply-annotation result carries a :pre-edit plist so postmortem can
 spot drift retrospectively. With matching marginalia text, :drift is nil."
