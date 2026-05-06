@@ -1,0 +1,48 @@
+name: elisp-tests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'lisp/claude-collab*.el'
+      - 'Eldev'
+      - '.github/workflows/elisp-tests.yml'
+  pull_request:
+    paths:
+      - 'lisp/claude-collab*.el'
+      - 'Eldev'
+      - '.github/workflows/elisp-tests.yml'
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        emacs-version:
+          - '29.4'
+          - '30.1'
+          - 'snapshot'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: jcs090218/setup-emacs@master
+        with:
+          version: ${{ matrix.emacs-version }}
+
+      - uses: emacs-eldev/setup-eldev@v1
+
+      - name: Byte-compile (smoke check)
+        # Adapter references org/evil/posframe/mcp-server/etc. which aren't
+        # in CI by default — `--warnings-as-errors' would fire on every
+        # call. The core file (Phase 2) will get strict byte-compile rules
+        # of its own once it lands; until then, this is a smoke check that
+        # the file at least parses.
+        run: eldev compile || true
+
+      - name: Run ERT suite
+        # Adapter integration tests (those that hit `mcp-server-security-safe-eval')
+        # `(ert-skip)' themselves when the local emacs-mcp-server checkout isn't
+        # available — leaving the pure core suite to gate the matrix.
+        run: eldev test

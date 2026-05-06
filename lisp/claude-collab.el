@@ -1,4 +1,8 @@
 ;;; claude-collab.el --- Annotations + session-scoped undo for Claude edits -*- lexical-binding: t -*-
+
+;; Version: 0.1.0
+;; Package-Requires: ((emacs "29.1") (org-remark "1.3"))
+
 ;;
 ;; Collaboration layer over `claude-code-ide' + `emacs-mcp-server':
 ;;

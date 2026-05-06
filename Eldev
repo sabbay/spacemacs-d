@@ -1,0 +1,41 @@
+;; -*- mode: emacs-lisp; lexical-binding: t -*-
+;;
+;; Eldev project file. This repo is a Spacemacs config, not a
+;; distributable package — so we don't try to treat it like one
+;; (no Package-Requires header, no `melpa-stable' target). We only
+;; want batch-mode test running and byte-compile checks for the
+;; `claude-collab' subsystem.
+
+(eldev-use-package-archive 'gnu)
+(eldev-use-package-archive 'melpa)
+
+;; The package metadata we care about lives in lisp/claude-collab.el,
+;; not at the repo root (the repo is a Spacemacs config with many
+;; unrelated layer files alongside).
+(setf eldev-project-main-file "lisp/claude-collab.el")
+
+;; Treat the lisp/ directory as both source and tests root.
+(eldev-add-loading-roots 'main "lisp")
+(eldev-add-loading-roots 'test "lisp")
+
+;; What we actually test.
+(setf eldev-test-fileset '("./lisp/*-test.el"))
+
+;; Source files that the lint/byte-compile targets care about.
+;; Only the claude-collab subsystem — the rest of lisp/ and especially
+;; init.el is Spacemacs-internal and doesn't benefit from this rig.
+(setf eldev-main-fileset '("./lisp/claude-collab*.el"
+                           "!./lisp/claude-collab*-test.el"))
+(setf eldev-files-to-package eldev-main-fileset)
+
+;; Runtime deps we expect to be available when tests load
+;; claude-collab.el. These are pulled from MELPA into .eldev/ on
+;; first run; they're development-time only.
+(eldev-add-extra-dependencies 'runtime 'org-remark)
+(eldev-add-extra-dependencies 'test 'org-remark)
+
+;; Lint with byte-compile-as-error + checkdoc. Skip package-lint
+;; (would complain we don't have a `;; Package-Requires:' header,
+;; which is correct — we're not a package).
+(setf eldev-lint-default '(elisp))
+(setf eldev-lint-disabled '(package))

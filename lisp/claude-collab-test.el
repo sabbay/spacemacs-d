@@ -7,6 +7,7 @@
 
 (require 'ert)
 (require 'cl-lib)
+(require 'claude-collab)
 
 ;;; --- test helpers ---
 
@@ -40,7 +41,11 @@
 
 (defun claude-collab-test--simulate-edit (buf pos text &optional replace-len)
   "Simulate a Claude edit: insert TEXT at POS in BUF (optionally replacing REPLACE-LEN chars).
-Routes through `mcp-server-security-safe-eval' so the advice fires."
+Routes through `mcp-server-security-safe-eval' so the advice fires.
+Skips the calling test if `mcp-server-security-safe-eval' is not loaded
+(eldev / batch CI without the local emacs-mcp-server checkout)."
+  (unless (fboundp 'mcp-server-security-safe-eval)
+    (ert-skip "mcp-server-security-safe-eval not loaded — integration test"))
   (let ((form
          (if replace-len
              `(with-current-buffer ,(buffer-name buf)

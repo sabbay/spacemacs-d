@@ -8,3 +8,6 @@
 
 # Spacemacs machine-specific environment cache
 .spacemacs.env
+
+# Eldev workspace (downloaded deps, byte-compile cache)
+.eldev/
