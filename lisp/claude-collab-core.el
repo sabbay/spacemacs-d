@@ -1,7 +1,6 @@
 ;;; claude-collab-core.el --- Pure core for claude-collab -*- lexical-binding: t -*-
 
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "29.1"))
 
 ;;; Commentary:
 ;;
@@ -72,8 +71,9 @@ Defaults to :annotation when UNIT is nil or an empty string."
 ;;; Edit-record argument lookup
 
 (defun claude-collab-core-batch-edit-arg (edit key)
-  "Look up KEY in EDIT, accepting plist, alist with symbol keys, or alist
-with string keys (depending on JSON parser of the MCP transport)."
+  "Look up KEY in EDIT in a JSON-parser-tolerant way.
+Accepts plist, alist with symbol keys, or alist with string keys —
+whichever shape the MCP transport's JSON decoder happened to produce."
   (cond
    ((plist-member edit key) (plist-get edit key))
    (t
@@ -175,9 +175,8 @@ Empty TEXT yields nil — we don't index zero-length needles."
 
 (defun claude-collab-core--context-matches-p
     (source position text-len context-before context-after)
-  "Non-nil if SOURCE has CONTEXT-BEFORE immediately before POSITION and
-CONTEXT-AFTER immediately after POSITION+TEXT-LEN. Empty context strings
-are treated as wildcards (always match)."
+  "Check that SOURCE has CONTEXT-BEFORE/AFTER around POSITION..POSITION+TEXT-LEN.
+Empty context strings are treated as wildcards (always match)."
   (let ((cb-len (length context-before))
         (ca-len (length context-after))
         (src-len (length source)))
@@ -247,8 +246,8 @@ time."
 ;;; Drift detection (precondition for safe apply)
 
 (defun claude-collab-core-detect-drift (source anchor)
-  "Return :clean if ANCHOR resolves to a unique region in SOURCE,
-otherwise return (:drifted :reason KIND :diagnosis PLIST).
+  "Return :clean iff ANCHOR resolves to a unique region in SOURCE.
+Otherwise return (:drifted :reason KIND :diagnosis PLIST).
 
 KIND is one of:
 - :not-found     the anchor's text doesn't appear in SOURCE

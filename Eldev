@@ -34,8 +34,20 @@
 (eldev-add-extra-dependencies 'runtime 'org-remark)
 (eldev-add-extra-dependencies 'test 'org-remark)
 
-;; Lint with byte-compile-as-error + checkdoc. Skip package-lint
-;; (would complain we don't have a `;; Package-Requires:' header,
-;; which is correct — we're not a package).
+;; Lint scope. We're not a distributable MELPA package, so skip:
+;; - `package' / `package-lint' — would demand a proper Package-Requires
+;;   header on a Spacemacs config we never publish
+;; - the `indent-character' / `fill-column' / `trailing-whitespace'
+;;   sub-checks of `elisp-lint' which fire false positives on
+;;   space-indented elisp + multi-paragraph docstrings (Emacs convention,
+;;   not the elisp-lint default's expectation).
+;; What stays: byte-compile, checkdoc, and the relint regex linter.
 (setf eldev-lint-default '(elisp))
 (setf eldev-lint-disabled '(package))
+(setq elisp-lint-ignored-validators
+      '("indent-character" "fill-column" "trailing-whitespace"))
+
+;; Modern Emacs Lisp uses single space after period in docstrings; the
+;; default `sentence-end-double-space' is t. Without flipping it,
+;; checkdoc fires on every period in every docstring — pure noise.
+(setq sentence-end-double-space nil)

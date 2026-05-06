@@ -33,13 +33,20 @@ jobs:
 
       - uses: emacs-eldev/setup-eldev@v1
 
-      - name: Byte-compile (smoke check)
-        # Adapter references org/evil/posframe/mcp-server/etc. which aren't
-        # in CI by default — `--warnings-as-errors' would fire on every
-        # call. The core file (Phase 2) will get strict byte-compile rules
-        # of its own once it lands; until then, this is a smoke check that
-        # the file at least parses.
-        run: eldev compile || true
+      - name: Byte-compile core (strict — warnings as errors)
+        # Pure core has no external runtime deps and must stay clean.
+        # Adapter `claude-collab.el' references org-mode / evil / posframe /
+        # mcp-server-* which aren't installed in CI; gating the matrix on
+        # those would mean stuffing the Emacs config into Eldev, which
+        # is overkill. So core gates strictly, adapter gets a soft pass.
+        run: eldev -p compile lisp/claude-collab-core.el --warnings-as-errors
+
+      - name: Byte-compile adapter (soft)
+        run: eldev -p compile lisp/claude-collab.el || true
+
+      - name: Lint core
+        # Same rationale as compile — core is the lint contract.
+        run: eldev lint lisp/claude-collab-core.el
 
       - name: Run ERT suite
         # Adapter integration tests (those that hit `mcp-server-security-safe-eval')

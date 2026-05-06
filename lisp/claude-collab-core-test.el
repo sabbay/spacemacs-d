@@ -178,6 +178,44 @@ to the ambiguous error (still reports all text occurrences for triage)."
     (should (eq :error (car result)))
     (should (eq :ambiguous (cadr result)))))
 
+(ert-deftest claude-collab-core-test-locate-anchor-overlapping-occurrences ()
+  "`--find-all-occurrences' advances by 1 not by text-length so it reports
+overlapping needles. \"abab\" / \"ab\" yields positions (0 2); \"aaaa\" /
+\"aa\" yields (0 1 2). A `perf optimization' to `(+ found text-len)' would
+break this without failing any other test — explicit guard."
+  (let* ((source "abab")
+         (anchor (claude-collab-core-test--anchor "ab"))
+         (result (claude-collab-core-locate-anchor source anchor)))
+    (should (eq :error (car result)))
+    (should (eq :ambiguous (cadr result)))
+    (should (equal '(0 2)
+                   (mapcar #'claude-collab-core-region-begin (caddr result)))))
+  (let* ((source "aaaa")
+         (anchor (claude-collab-core-test--anchor "aa"))
+         (result (claude-collab-core-locate-anchor source anchor)))
+    (should (eq :error (car result)))
+    (should (eq :ambiguous (cadr result)))
+    (should (equal '(0 1 2)
+                   (mapcar #'claude-collab-core-region-begin (caddr result))))))
+
+(ert-deftest claude-collab-core-test-locate-anchor-asymmetric-context ()
+  "Mid-document anchor with empty `:context-before' and non-empty
+`:context-after' (or vice-versa) — the typical degraded case for
+text-only marginalia until context is captured at marking time."
+  (let* ((source "alpha BRAVO charlie BRAVO delta")
+         (anchor (claude-collab-core-test--anchor "BRAVO" "" " charlie"))
+         (result (claude-collab-core-locate-anchor source anchor)))
+    (should (eq :ok (car result)))
+    (should (= 6 (claude-collab-core-region-begin (cadr result))))))
+
+(ert-deftest claude-collab-core-test-locate-anchor-empty-text ()
+  "Empty anchor text → not-found. We don't index zero-length needles
+\(would otherwise match every position)."
+  (let* ((source "abc")
+         (anchor (claude-collab-core-test--anchor ""))
+         (result (claude-collab-core-locate-anchor source anchor)))
+    (should (equal '(:error :not-found nil) result))))
+
 (ert-deftest claude-collab-core-test-locate-anchor-empty-source ()
   "Empty source string = not found."
   (let* ((source "")

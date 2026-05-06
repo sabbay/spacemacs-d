@@ -1,0 +1,243 @@
+- generic [active]:
+  - link "Skip to main content" [ref=e1] [cursor=pointer]:
+    - /url: "#main-content"
+  - generic:
+    - generic:
+      - banner:
+        - generic [ref=e6]:
+          - link "Home" [ref=e7] [cursor=pointer]:
+            - /url: /en
+            - img "Home" [ref=e9]
+          - list [ref=e11]:
+            - listitem [ref=e12]:
+              - link "Home" [ref=e13] [cursor=pointer]:
+                - /url: /en/home
+            - listitem [ref=e14]:
+              - link "Lines" [ref=e15] [cursor=pointer]:
+                - /url: /en/indoor/indoor-lines
+            - listitem [ref=e16]:
+              - link "Products" [ref=e17] [cursor=pointer]:
+                - /url: /en/indoor/products
+            - listitem [ref=e18]:
+              - link "Retailers" [ref=e19] [cursor=pointer]:
+                - /url: /en/retailers
+          - generic [ref=e22] [cursor=pointer]:
+            - img [ref=e23]
+            - generic [ref=e27]: COUNTRIES
+          - navigation [ref=e28]:
+            - generic [ref=e29]:
+              - generic [ref=e30] [cursor=pointer]: EN
+              - list:
+                - listitem:
+                  - link "IT":
+                    - /url: /it/indoor/cucine-acciaio/ascot-100
+                - listitem:
+                  - link "DE":
+                    - /url: /de/indoor/cucine-acciaio/ascot-100
+                - listitem:
+                  - link "FR":
+                    - /url: /fr/indoor/cuisinieres-en-acier-inox/ascot-100
+                - listitem:
+                  - link "NL":
+                    - /url: /nl/indoor/roestvrij-stalen-fornuizen/ascot-100
+                - listitem:
+                  - link "ES":
+                    - /url: /es/indoor/cocinas-de-acero/ascot-100
+      - generic:
+        - generic:
+          - generic:
+            - link "Home":
+              - /url: /en
+              - generic:
+                - img "Home"
+          - generic:
+            - generic:
+              - generic:
+                - list
+              - generic:
+                - list
+              - generic:
+                - list
+          - generic:
+            - generic:
+              - generic:
+                - list
+      - generic [ref=e36]:
+        - main [ref=e37]:
+          - article [ref=e41]:
+            - article [ref=e42]:
+              - generic [ref=e45]:
+                - heading "ASCOT 100" [level=1] [ref=e47]:
+                  - generic [ref=e48]: ASCOT 100
+                - generic [ref=e49]:
+                  - paragraph [ref=e51]:
+                    - text: Semiprofessional stainless steel range cookers for domestic use, studied in materials and technology to guarantee high-level performances.
+                    - text: A look inspired by tradition, elegant aesthetics and refined details, available in 4 different metal trims.
+                    - text: Cook-tops for every need, with brass burners and cast-iron grids in the full-gas options, flex-induction for the full-electric ones, a combination of brass burners and electric grill or plate for the hybrid options.
+                    - text: Combi-steam oven with 15 functions and automatic TFT programmer, INNVENT patented ventilation system in the 90cm ovens for perfectly even cooking.
+                    - text: "Power and performance, yet with an eye fixed on energy saving: ECO and SHABBAT modes ensure the lowest consumption, combi-steam system allows to reduce the temperature and cooking time while obtaining superior results, top-performance brass burners, fully electric cookers…"
+                  - generic [ref=e53]:
+                    - link "configuration" [ref=e54] [cursor=pointer]:
+                      - /url: "?configure=1"
+                    - link "request information" [ref=e55] [cursor=pointer]:
+                      - /url: "#block-webform-request-informations"
+            - group "Gallery" [ref=e65]:
+              - generic [ref=e66]:
+                - tabpanel [ref=e67]
+                - tabpanel [ref=e70]
+                - tabpanel "1 of 4" [ref=e73]
+                - tabpanel [ref=e76]
+                - tabpanel [ref=e79]
+                - tabpanel [ref=e82]
+                - tabpanel [ref=e85]
+                - tabpanel [ref=e88]
+              - button "Next slide" [ref=e92] [cursor=pointer]:
+                - img [ref=e93]
+        - generic [ref=e98]:
+          - generic [ref=e100]: Request information
+          - generic [ref=e102]:
+            - generic [ref=e103]:
+              - generic [ref=e104]: Name and Surname
+              - textbox "Name and Surname" [ref=e105]
+            - group "Country" [ref=e106]:
+              - generic [ref=e107]: Country
+              - generic [ref=e109]:
+                - generic [ref=e110]: Country
+                - combobox [ref=e111]
+                - combobox "Select" [ref=e114] [cursor=pointer]:
+                  - textbox "Select" [ref=e115]
+            - generic [ref=e116]:
+              - generic [ref=e117]: Postcode / ZIP Code
+              - textbox "Postcode / ZIP Code" [ref=e118]
+            - generic [ref=e119]:
+              - generic [ref=e120]: Email
+              - textbox "Email" [ref=e121]
+            - generic [ref=e122]:
+              - generic [ref=e123]: Phone
+              - textbox "Phone" [ref=e124]
+            - generic [ref=e125]:
+              - generic [ref=e126]: Message
+              - textbox "Message" [ref=e128]
+            - generic [ref=e129]:
+              - checkbox "Privacy policy" [ref=e130]
+              - text: Privacy policy
+              - generic [ref=e132]:
+                - text: I accept the
+                - link "privacy policy" [ref=e133] [cursor=pointer]:
+                  - /url: http://en/privacy-policy/
+            - button "Send" [ref=e135]
+        - contentinfo [ref=e136]:
+          - generic [ref=e137]:
+            - generic [ref=e138]:
+              - generic [ref=e142]:
+                - list [ref=e144]:
+                  - listitem [ref=e145]:
+                    - link "Contacts" [ref=e146] [cursor=pointer]:
+                      - /url: /en/contacts
+                  - listitem
+                  - listitem [ref=e147]:
+                    - link "Company" [ref=e148] [cursor=pointer]:
+                      - /url: /en/company
+                  - listitem [ref=e149]:
+                    - link "Sustainability" [ref=e150] [cursor=pointer]:
+                      - /url: /en/sustainability
+                - list [ref=e152]:
+                  - listitem [ref=e153]:
+                    - link "Indoor" [ref=e154] [cursor=pointer]:
+                      - /url: /en/indoor
+                  - listitem [ref=e155]:
+                    - link "Outdoor" [ref=e156] [cursor=pointer]:
+                      - /url: /en/outdoor
+              - generic [ref=e158]:
+                - generic [ref=e159]:
+                  - generic [ref=e161]: Service & Support
+                  - list [ref=e165]:
+                    - listitem [ref=e166]:
+                      - link "Catalogues" [ref=e167] [cursor=pointer]:
+                        - /url: /en/catalogs
+                    - listitem [ref=e168]:
+                      - link "Consumer specifications" [ref=e169] [cursor=pointer]:
+                        - /url: /en/consumer-specifications
+                    - listitem [ref=e170]:
+                      - link "Dimensions" [ref=e171] [cursor=pointer]:
+                        - /url: /en/dimensions
+                    - listitem [ref=e172]:
+                      - link "Exploded views" [ref=e173] [cursor=pointer]:
+                        - /url: https://steel-cucine.com/esplosi
+                    - listitem [ref=e174]:
+                      - link "Product Manuals" [ref=e175] [cursor=pointer]:
+                        - /url: /en/product-manuals
+                    - listitem
+                    - listitem [ref=e176]:
+                      - link "Warranty product registration" [ref=e177] [cursor=pointer]:
+                        - /url: https://steel-cucine.com/en/warranty-product-registration
+                - generic [ref=e180]:
+                  - link [ref=e181] [cursor=pointer]:
+                    - /url: https://www.facebook.com/pages/Steel/169035329821267
+                  - link [ref=e182] [cursor=pointer]:
+                    - /url: https://www.instagram.com/steel_cucine/
+                  - link [ref=e183] [cursor=pointer]:
+                    - /url: https://www.linkedin.com/company/steel-srl/
+                  - link [ref=e184] [cursor=pointer]:
+                    - /url: https://www.youtube.com/channel/UCldXWwaskfSxnmxZD0TDA8A
+                  - link:
+                    - /url: https://www.confindustriaemilia.it/flex/FixedPages/Common/associati.php/L/IT/id/c3705094-9cda-e711-80ea-1458d0431690
+            - generic [ref=e185]:
+              - paragraph [ref=e190]:
+                - text: © 2025 - Steel Cucine | VAT IT02612880365 | Telephone
+                - link "+39 059 645180" [ref=e191] [cursor=pointer]:
+                  - /url: tel:+39059645180
+                - text: "|"
+                - link "Privacy policy" [ref=e192] [cursor=pointer]:
+                  - /url: /en/privacy-policy
+                - text: "|"
+                - link "Cookie policy" [ref=e193] [cursor=pointer]:
+                  - /url: /en/cookie-policy
+              - paragraph [ref=e199]
+  - generic [ref=e202]:
+    - img [ref=e204] [cursor=pointer]
+    - paragraph [ref=e207]: CHOOSE YOUR COUNTRY
+    - generic [ref=e208]:
+      - generic [ref=e209]:
+        - img "Europe" [ref=e210]
+        - list [ref=e211]:
+          - listitem [ref=e212]:
+            - link "Italy" [ref=e213] [cursor=pointer]:
+              - /url: "/it?sls=true\n"
+          - listitem [ref=e214]:
+            - link "Germany" [ref=e215] [cursor=pointer]:
+              - /url: "/de?sls=true\n"
+          - listitem [ref=e216]:
+            - link "France" [ref=e217] [cursor=pointer]:
+              - /url: "/fr?sls=true\n"
+          - listitem [ref=e218]:
+            - link "Benelux" [ref=e219] [cursor=pointer]:
+              - /url: "/nl?sls=true\n"
+          - listitem [ref=e220]:
+            - link "Spain" [ref=e221] [cursor=pointer]:
+              - /url: "/es?sls=true\n"
+          - listitem [ref=e222]:
+            - link "Other Countries" [ref=e223] [cursor=pointer]:
+              - /url: /en?sls=true
+      - generic [ref=e224]:
+        - img "USA" [ref=e225]
+        - list [ref=e226]:
+          - listitem [ref=e227]:
+            - link "USA/Canada" [ref=e228] [cursor=pointer]:
+              - /url: http://steel-cucine.us/en?sls=true
+      - generic [ref=e229]:
+        - img "Australia" [ref=e230]
+        - list [ref=e231]:
+          - listitem [ref=e232]:
+            - link "Australia" [ref=e233] [cursor=pointer]:
+              - /url: /en?sls=true
+      - generic [ref=e234]:
+        - img "Rest of the world" [ref=e235]
+        - list [ref=e236]:
+          - listitem [ref=e237]:
+            - link "Rest of the world" [ref=e238] [cursor=pointer]:
+              - /url: /en?sls=false
+  - iframe [ref=e241]:
+    - generic [ref=f3e6]:
+      - text: protected by
+      - strong [ref=f3e7]: reCAPTCHA
