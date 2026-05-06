@@ -11,3 +11,7 @@
 
 # Eldev workspace (downloaded deps, byte-compile cache)
 .eldev/
+
+# Runtime telemetry log (claude-collab MCP calls — see Eldev for cap rules)
+.claude-collab.log.jsonl
+.claude-collab.log.jsonl.1

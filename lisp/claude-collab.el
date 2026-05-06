@@ -21,6 +21,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'claude-collab-core)
 
 (cl-defstruct claude-collab-edit
   session-id buffer buffer-name begin end
@@ -92,23 +93,6 @@ user-visible prose Claude would edit deliberately."
        (let ((name (buffer-name buf)))
          (and (not (string-prefix-p " " name))
               (not (string-match-p "marginalia\\.org" name))))))
-
-(defun claude-collab--common-prefix-length (a b)
-  "Length of the common leading substring of strings A and B."
-  (let ((i 0) (cap (min (length a) (length b))))
-    (while (and (< i cap) (eq (aref a i) (aref b i)))
-      (cl-incf i))
-    i))
-
-(defun claude-collab--common-suffix-length (a b)
-  "Length of the common trailing substring of strings A and B."
-  (let ((i 0) (la (length a)) (lb (length b))
-        (cap (min (length a) (length b))))
-    (while (and (< i cap)
-                (eq (aref a (- la 1 i))
-                    (aref b (- lb 1 i))))
-      (cl-incf i))
-    i))
 
 (defun claude-collab--file-buffers ()
   "Live, file-backed buffers — the universe we track annotations in."
@@ -227,8 +211,8 @@ doesn't fragment into dozens of character-level overlays."
          (with-current-buffer buf
            (let ((after (buffer-substring-no-properties (point-min) (point-max))))
              (unless (string= before after)
-               (let* ((pre (claude-collab--common-prefix-length before after))
-                      (suf (claude-collab--common-suffix-length
+               (let* ((pre (claude-collab-core--common-prefix-length before after))
+                      (suf (claude-collab-core--common-suffix-length
                             (substring before pre)
                             (substring after pre)))
                       (before-diff (substring before pre
@@ -560,28 +544,6 @@ label round-trips across save/reload — overlay props don't."
 ;; structure to a concrete range BEFORE the edit RPC. We follow the same
 ;; split so Claude composes: resolve first, mutate second.
 
-(defun claude-collab--normalize-action (action)
-  "Normalize ACTION (symbol, keyword, or string) to a keyword."
-  (cond
-   ((keywordp action) action)
-   ((symbolp action) (intern (concat ":" (symbol-name action))))
-   ((stringp action)
-    (intern (if (string-prefix-p ":" action) action (concat ":" action))))
-   (t (error "Invalid action: %S" action))))
-
-(defun claude-collab--normalize-unit (unit)
-  "Normalize UNIT (symbol, keyword, string, or nil) to a keyword.
-Defaults to :annotation when UNIT is nil or an empty string."
-  (cond
-   ((null unit) :annotation)
-   ((keywordp unit) unit)
-   ((symbolp unit) (intern (concat ":" (symbol-name unit))))
-   ((stringp unit)
-    (if (string-empty-p unit)
-        :annotation
-      (intern (if (string-prefix-p ":" unit) unit (concat ":" unit)))))
-   (t (error "Invalid unit: %S" unit))))
-
 (defun claude-collab--edit-region (buffer begin end new-text)
   "In BUFFER, replace BEGIN..END with NEW-TEXT and save the buffer.
 Shared low-level helper for `claude-collab-apply-annotation' and
@@ -649,8 +611,8 @@ sanity-aborting yet."
                                           (substring new-text 0
                                                      (min 80 (length new-text))))
                                      :unit unit)
-    (let* ((action (claude-collab--normalize-action action))
-           (unit (claude-collab--normalize-unit unit))
+    (let* ((action (claude-collab-core-normalize-action action))
+           (unit (claude-collab-core-normalize-unit unit))
            (found (claude-collab--find-annotation id)))
       (cond
        ((not found)
@@ -832,7 +794,7 @@ Notes on specific units:
   next, so callers should end their replacement text with a newline
   if they want the separator preserved."
   (claude-collab--with-mcp-log "get-region-bounds" (list :id id :unit unit)
-    (let* ((unit (claude-collab--normalize-unit unit))
+    (let* ((unit (claude-collab-core-normalize-unit unit))
            (found (claude-collab--find-annotation id)))
       (cond
        ((not found)
@@ -889,16 +851,6 @@ not integers, the range is inverted, or the range is out of bounds."
                       :new-begin begin
                       :new-end (+ begin (length new-text))))))))))))))
 
-(defun claude-collab--batch-edit-arg (edit key)
-  "Look up KEY in EDIT, accepting plist, alist with symbol keys, or alist
-with string keys (depending on JSON parser of the MCP transport)."
-  (cond
-   ((plist-member edit key) (plist-get edit key))
-   (t
-    (let ((sym (intern (substring (symbol-name key) 1))))
-      (or (alist-get sym edit)
-          (alist-get (symbol-name sym) edit nil nil #'equal))))))
-
 (defun claude-collab-apply-batch (edits)
   "Apply each entry in EDITS via `claude-collab-apply-annotation', in order.
 Each edit is a plist or alist with keys :id (required), :action (required),
@@ -916,7 +868,7 @@ RESULTS is the apply-annotation result with :id prepended for matching."
                                (list :edit-count (and (listp edits) (length edits))
                                      :ids (and (listp edits)
                                                (mapcar (lambda (e)
-                                                         (claude-collab--batch-edit-arg e :id))
+                                                         (claude-collab-core-batch-edit-arg e :id))
                                                        edits)))
     (cond
      ((not (listp edits))
@@ -926,12 +878,12 @@ RESULTS is the apply-annotation result with :id prepended for matching."
             (applied 0)
             (failed 0))
         (dolist (edit edits)
-          (let* ((id (claude-collab--batch-edit-arg edit :id))
+          (let* ((id (claude-collab-core-batch-edit-arg edit :id))
                  (raw
                   (condition-case err
-                      (let ((action (claude-collab--batch-edit-arg edit :action))
-                            (new-text (claude-collab--batch-edit-arg edit :new-text))
-                            (unit (claude-collab--batch-edit-arg edit :unit)))
+                      (let ((action (claude-collab-core-batch-edit-arg edit :action))
+                            (new-text (claude-collab-core-batch-edit-arg edit :new-text))
+                            (unit (claude-collab-core-batch-edit-arg edit :unit)))
                         (cond
                          ((null id) (list :error "Missing :id in edit"))
                          ((null action) (list :error "Missing :action in edit"))
@@ -1052,11 +1004,11 @@ Errors are silenced — file logging must never crash an MCP handler."
            (ts (format-time-string "%Y-%m-%d %H:%M:%S.%3N" time))
            (sid (and (boundp 'claude-collab--active-session)
                      claude-collab--active-session))
-           (args-str (claude-collab--prin1 args))
+           (args-str (claude-collab-core-prin1 args))
            (result-str (cond
                         ((null result) nil)
                         ((stringp result) result)
-                        (t (claude-collab--prin1 result)))))
+                        (t (claude-collab-core-prin1 result)))))
       ;; Buffer (live tail).
       (with-current-buffer (claude-collab--mcp-log-buffer)
         (let ((inhibit-read-only t))
@@ -1126,33 +1078,20 @@ stacktrace it would have gotten unwrapped."
 
 ;;; MCP tool registrations
 
-(defun claude-collab--prin1 (sexp)
-  "Serialize SEXP as a `prin1' string with no length/depth caps.
-The default Spacemacs profile sets `print-length' and `print-level' to
-10, which truncates plists with more than 10 elements (each annotation
-plist has 12, so the trailing `:label' silently becomes `...'). MCP
-clients eat the printed sexp as text — truncation there is a real bug,
-not a debugger nicety."
-  (let ((print-length nil)
-        (print-level nil)
-        (print-circle nil)
-        (print-escape-newlines t))
-    (prin1-to-string sexp)))
-
 (defun claude-collab--mcp-list-annotations (args)
   "MCP handler: list pending annotations. ARGS may contain :file."
   (let* ((file (alist-get 'file args))
          (anns (if file
                    (claude-collab-pending-annotations (expand-file-name file))
                  (claude-collab--all-annotations))))
-    (claude-collab--prin1 anns)))
+    (claude-collab-core-prin1 anns)))
 
 (defun claude-collab--mcp-resolve-annotation (args)
   "MCP handler: resolve annotation by ID. ARGS must contain :id."
   (let ((id (alist-get 'id args)))
     (unless id (error "Missing required arg: id"))
     (let ((data (claude-collab-resolve-annotation-by-id id)))
-      (format "Resolved annotation %s: %s" id (claude-collab--prin1 data)))))
+      (format "Resolved annotation %s: %s" id (claude-collab-core-prin1 data)))))
 
 (defun claude-collab--mcp-arg (args key)
   "Look up KEY in ARGS, accepting both symbol and string keys."
@@ -1168,14 +1107,14 @@ Required keys in ARGS: :id, :action. Optional: :new-text, :unit."
         (unit (claude-collab--mcp-arg args 'unit)))
     (unless id (error "Missing required arg: id"))
     (unless action (error "Missing required arg: action"))
-    (claude-collab--prin1 (claude-collab-apply-annotation id action new-text unit))))
+    (claude-collab-core-prin1 (claude-collab-apply-annotation id action new-text unit))))
 
 (defun claude-collab--mcp-get-region-bounds (args)
   "MCP handler: return bounds of UNIT around annotation ID."
   (let ((id (claude-collab--mcp-arg args 'id))
         (unit (claude-collab--mcp-arg args 'unit)))
     (unless id (error "Missing required arg: id"))
-    (claude-collab--prin1 (claude-collab-get-region-bounds id unit))))
+    (claude-collab-core-prin1 (claude-collab-get-region-bounds id unit))))
 
 (defun claude-collab--mcp-apply-edit (args)
   "MCP handler: apply a dumb buffer edit between BEGIN and END."
@@ -1187,7 +1126,7 @@ Required keys in ARGS: :id, :action. Optional: :new-text, :unit."
     (unless (integerp begin) (error "Missing or non-integer arg: begin"))
     (unless (integerp end) (error "Missing or non-integer arg: end"))
     (unless (stringp new-text) (error "Missing required arg: new-text"))
-    (claude-collab--prin1 (claude-collab-apply-edit file begin end new-text))))
+    (claude-collab-core-prin1 (claude-collab-apply-edit file begin end new-text))))
 
 (defun claude-collab--mcp-get-active-plan (_args)
   "MCP handler: return active plan path (or empty string if none)."
@@ -1199,7 +1138,7 @@ Required key in ARGS: :edits (a list of objects with :id, :action,
 optional :new-text and :unit)."
   (let ((edits (claude-collab--mcp-arg args 'edits)))
     (unless edits (error "Missing required arg: edits"))
-    (claude-collab--prin1 (claude-collab-apply-batch edits))))
+    (claude-collab-core-prin1 (claude-collab-apply-batch edits))))
 
 (defun claude-collab--mcp-run-tests (_args)
   "MCP handler: run the ERT suite; return pass/fail plist."
@@ -1208,7 +1147,7 @@ optional :new-text and :unit)."
       (load-file test-file)))
   (if (not (fboundp 'claude-collab-run-tests))
       "ERROR: claude-collab-test not loaded (file missing?)"
-    (claude-collab--prin1 (claude-collab-run-tests))))
+    (claude-collab-core-prin1 (claude-collab-run-tests))))
 
 (with-eval-after-load 'mcp-server-tools
   (when (fboundp 'mcp-server-register-tool)
