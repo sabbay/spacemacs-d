@@ -1,3 +1,0 @@
-[     683ms] [WARNING] GSAP target null not found. https://greensock.com @ https://steel-cucine.com/themes/custom/steel/dist/chunks/gsap.d1fb82f9.js:8
-[    1122ms] [ERROR] Failed to load resource: net::ERR_CERT_AUTHORITY_INVALID @ https://www.googletagmanager.com/gtm.js?id=GTM-W87VTBV:0
-[    1166ms] [ERROR] Failed to load resource: net::ERR_CERT_AUTHORITY_INVALID @ https://js.hscollectedforms.net/collectedforms.js:0
