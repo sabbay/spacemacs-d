@@ -420,10 +420,37 @@ doesn't fragment into dozens of character-level overlays."
 (when (require 'org-remark nil t)
   (org-remark-global-tracking-mode 1))
 
+(defun claude-collab--redirect-mark-to-add-annotation (orig &rest args)
+  "Force interactive `org-remark-mark' through `claude-collab-add-annotation'.
+Vanilla `org-remark-mark' creates a label-less highlight (label = literal
+\"nil\") which is invisible to `/design revise' — the resulting region is a
+ghost: visible overlay, no instruction. Programmatic callers (org-remark
+internals reload from marginalia, etc.) bypass the redirect and get the
+original behavior; only direct user interaction (key, menubar, M-x) is
+funneled through the prompt."
+  (if (called-interactively-p 'any)
+      (call-interactively #'claude-collab-add-annotation)
+    (apply orig args)))
+
+(with-eval-after-load 'org-remark
+  (advice-add 'org-remark-mark :around
+              #'claude-collab--redirect-mark-to-add-annotation))
+
 (defun claude-collab--annotation-overlay-p (ov)
   "Non-nil if OV is an org-remark annotation overlay."
   (or (overlay-get ov 'org-remark-id)
       (eq (overlay-get ov 'category) 'org-remark-highlighter)))
+
+(defun claude-collab--annotation-note (highlight)
+  "Return the user's note for HIGHLIGHT, or nil if the annotation is empty.
+Prefers `:label' (set by `claude-collab-add-annotation' via the prompt path),
+falls back to the marginalia headline body (set by hand-edit of the notes
+file). A whitespace-only body is treated as nil."
+  (or (plist-get highlight :label)
+      (let ((body (plist-get (plist-get highlight :props) :body)))
+        (and body
+             (not (string-empty-p (string-trim body)))
+             (string-trim body)))))
 
 (defun claude-collab--annotations-in-buffer (buf)
   "Return list of annotation plists in BUF.
@@ -446,7 +473,7 @@ label round-trips across save/reload — overlay props don't."
                               :begin (car loc)
                               :end (cdr loc)
                               :text (plist-get (plist-get h :props) :original-text)
-                              :label (plist-get h :label))))
+                              :label (claude-collab--annotation-note h))))
                     (org-remark-highlights-get notes-buf))))))))
 
 (defun claude-collab-pending-annotations (file)

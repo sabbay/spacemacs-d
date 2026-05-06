@@ -185,6 +185,44 @@ Routes through `mcp-server-security-safe-eval' so the advice fires."
         (should (plist-get (car anns) :id))
         (should (equal "world" (plist-get (car anns) :text)))))))
 
+(ert-deftest claude-collab-test-annotation-body-fallback ()
+  "When :org-remark-label is nil, the marginalia headline body fills in."
+  (skip-unless (fboundp 'org-remark-highlight-mark))
+  (claude-collab-test--with-temp-file buf file
+    (with-current-buffer buf
+      ;; Mark the region with no label (vanilla `org-remark-mark' shape).
+      (org-remark-highlight-mark 7 12 nil nil nil)
+      (save-buffer))
+    ;; Inject a body note into the marginalia headline by hand.
+    (let* ((notes-file (with-current-buffer buf
+                         (org-remark-notes-get-file-name)))
+           (notes-buf (find-file-noselect notes-file)))
+      (with-current-buffer notes-buf
+        (goto-char (point-max))
+        (insert "\nuser-typed body note\n")
+        (save-buffer))
+      (let* ((anns (claude-collab--annotations-in-buffer buf))
+             (a (car anns)))
+        (should (= 1 (length anns)))
+        (should (equal "user-typed body note" (plist-get a :label)))))))
+
+(ert-deftest claude-collab-test-annotation-empty-body-stays-nil ()
+  "Whitespace-only body must not masquerade as a real note."
+  (skip-unless (fboundp 'org-remark-highlight-mark))
+  (claude-collab-test--with-temp-file buf file
+    (with-current-buffer buf
+      (org-remark-highlight-mark 7 12 nil nil nil)
+      (save-buffer))
+    (let* ((notes-file (with-current-buffer buf
+                         (org-remark-notes-get-file-name)))
+           (notes-buf (find-file-noselect notes-file)))
+      (with-current-buffer notes-buf
+        (goto-char (point-max))
+        (insert "\n   \n\t\n")
+        (save-buffer))
+      (let ((a (car (claude-collab--annotations-in-buffer buf))))
+        (should (null (plist-get a :label)))))))
+
 (ert-deftest claude-collab-test-annotation-coupling ()
   "Resolve + undo-session restores the annotation."
   (skip-unless (fboundp 'org-remark-highlight-mark))
