@@ -196,21 +196,22 @@ Annotation-driven and conversational flows share the three-step resolve (see "Re
 In priority order:
 
 1. If the user passed an explicit path as the second argument, use it. Expand `~` if present.
-2. Else, call `mcp__emacs__eval-elisp` with:
+2. Else, call `mcp__emacs__claude-collab-get-active-plan` (no args). It returns the absolute path of the most recently annotated plan file (set by `SPC o c c` on any `.org` file under a `plans/` directory) — or an empty string if none. This is the **most reliable** signal because it captures intent directly: the user annotated *this* plan, so this is the plan to revise. Works in daemon mode where window/frame state is unreliable. If the result is non-empty, use it.
+3. Else, call `mcp__emacs__eval-elisp` with:
    ```elisp
    (with-current-buffer (window-buffer (selected-window))
      buffer-file-name)
    ```
    If the returned path is an `.org` file whose directory path contains `/plans/` as a component, use it.
 
-   If the result is `nil`, empty, or the string "nil", fall through to step 3 (most-recent-plan fallback). Also note that `mcp__emacs__eval-elisp` returns printed sexp output — a filename comes back wrapped in quotes (e.g. `"/path/to/file.org"`). Strip the surrounding quotes before using the path.
+   If the result is `nil`, empty, or the string "nil", fall through to step 4 (most-recent-plan fallback). Also note that `mcp__emacs__eval-elisp` returns printed sexp output — a filename comes back wrapped in quotes (e.g. `"/path/to/file.org"`). Strip the surrounding quotes before using the path.
 
-   Caveat: in a daemonized Emacs with no attached frame, `(selected-window)` may pick an arbitrary buffer. If step 2 returns a path that clearly isn't a plan file (not under a `plans/` directory, or not .org), treat it as unusable and fall through to step 3.
-3. Else, fall back to the most recently modified `.org` file in the current scope's plans directory (same logic as Author mode: repo-local if in a git repo, else `~/plans/`):
+   Caveat: in a daemonized Emacs with no attached frame, `(selected-window)` may pick an arbitrary buffer. If step 3 returns a path that clearly isn't a plan file (not under a `plans/` directory, or not .org), treat it as unusable and fall through to step 4. Step 2 (active-plan tracking) is preferred precisely because it sidesteps this caveat.
+4. Else, fall back to the most recently modified `.org` file in the current scope's plans directory (same logic as Author mode: repo-local if in a git repo, else `~/plans/`):
    ```bash
    ls -t <target-dir>/*.org 2>/dev/null | head -1
    ```
-4. If none of the above yields a path, abort with: "No plan found to revise. Run `/design <topic>` to create one, or pass an explicit path."
+5. If none of the above yields a path, abort with: "No plan found to revise. Run `/design <topic>` to create one, or pass an explicit path."
 
 ### List pending annotations
 
@@ -228,34 +229,48 @@ Neither a line number nor an enclosing heading is provided. Derive them yourself
 
 If there are no pending annotations, stop with: "No pending annotations in `<path>`."
 
-### Apply each annotation
+### Apply annotations as a batch
 
-For each annotation, in file order:
+Plan all edits first, then apply them in **one** `claude-collab-apply-batch` call. Do not narrate phase-by-phase progress between annotations — it costs tokens and adds latency without giving the user anything they can't see in the final report. The batch tool continues on per-edit error, so a single bad entry doesn't block the rest.
+
+For each annotation, decide the edit in your head (don't tool-call yet):
 
 1. Read the `:label` as the user's edit intent. Common patterns:
-   - "skip" / "drop" → delete the annotated step or section.
+   - "skip" / "drop" → `action: delete` (with `unit: list-item` or `unit: section` if reaching beyond the highlight).
    - "combine with next" / "merge 5 and 6" → merge items.
-   - "expand" / "more detail" → rewrite with more specificity.
-   - "reword: X" → replace the text with X.
-   - Free-form prose → interpret as an instruction and apply the smallest edit that satisfies it. Prefer replacing only the annotated region; widen scope (via `claude-collab-get-region-bounds`) only when the instruction plainly reaches beyond the highlight.
-2. Edit the **live Emacs buffer**, NOT the file on disk. Two reasons: (a) the user may have unsaved changes in the buffer, and a disk edit would either clobber them or lose the update when Emacs flags divergence; (b) annotation `:begin`/`:end` from `claude-collab-list-annotations` are buffer positions at save time — they drift as the buffer mutates, so always resolve the live overlay before editing.
+   - "expand" / "more detail" → `action: replace` with rewritten body, usually `unit: section`.
+   - "reword: X" → `action: replace, new-text: "X"`, no unit.
+   - Free-form prose → interpret as instruction; smallest edit that satisfies it.
 
-   Three MCP tools cover the edit patterns:
+2. Pick `unit` based on scope:
+   - Default (no unit) — edit lives within the highlight.
+   - `unit: list-item` — drop/replace a whole bullet.
+   - `unit: section` — rewrite a whole org subtree (heading + body).
+   - `unit: paragraph` — only valid in non-org buffers (errors in org-mode; use `section` or `list-item` there).
 
-   - `claude-collab-apply-annotation` — edits scoped to the annotation itself. Use when the user's intent lives within the highlighted region (reword, delete, insert adjacent).
-   - `claude-collab-get-region-bounds` + `claude-collab-apply-edit` — edits scoped to a structural unit that contains the annotation (section, list-item, paragraph, line). Use when the intent reaches beyond the highlight.
+   For replacements that span structural units, **always pass unit** — the snap preserves trailing newlines and prevents adjacent-section damage.
 
-   Concrete flows:
+3. Edit the **live Emacs buffer**, NOT the file on disk. The buffer may have unsaved changes; overlay positions drift relative to disk-saved `:begin`/`:end`.
 
-   - **Reword** ("reword: X"): one call to `claude-collab-apply-annotation` with `:id <id> :action replace :new-text "X"`. Auto-resolves on success — no separate resolve call.
-   - **Skip / drop a step**: `claude-collab-get-region-bounds` with `:id <id> :unit list-item` to get `(:begin B :end E)`, then `claude-collab-apply-edit` with `:file <path> :begin B :end E :new-text ""`. Then call `claude-collab-resolve-annotation` with `:id` — the get-region-bounds + apply-edit path does not auto-resolve.
-   - **Expand a section**: `claude-collab-get-region-bounds` with `:unit section`, then `claude-collab-apply-edit` with the rewritten section text as `:new-text`. Call `claude-collab-resolve-annotation` afterwards.
-   - **Insert a new step after this one**: `claude-collab-get-region-bounds` with `:unit list-item` to get `(:begin B :end E)`, then `claude-collab-apply-edit` with `:begin E :end E :new-text "<new step text>"`. Call `claude-collab-resolve-annotation` afterwards.
-   - **Merge with next** ("combine with next"): two `claude-collab-get-region-bounds` passes if the next item is annotated too; otherwise use `:unit list-item` on the current annotation to get its end, splice in the next item's text, and delete the next item's range. Then resolve both annotations.
+Once the plan is built, send one call:
 
-   `claude-collab-apply-annotation` auto-resolves the annotation on success, so no separate `claude-collab-resolve-annotation` call is needed. When using the `get-region-bounds` + `apply-edit` path, always follow up with an explicit `claude-collab-resolve-annotation` call — otherwise the annotation keeps showing as pending.
+```
+claude-collab-apply-batch
+  edits: [
+    { id: "<id1>", action: "replace", new-text: "...", unit: "section" },
+    { id: "<id2>", action: "delete", unit: "list-item" },
+    { id: "<id3>", action: "replace", new-text: "..." }
+  ]
+```
 
-3. After the edit lands, the annotation should be resolved (auto via `apply-annotation`, or explicitly via `claude-collab-resolve-annotation`).
+The result lists per-edit success/error keyed by `:id`. Each successful edit auto-resolves the annotation. Report back to the user using these results (see "Report back" below). If any edit failed, surface it to the user — never claim success silently. Text edits made via the batch are logged in the current Claude session, so the user can revert the whole batch atomically with `M-x claude-collab-undo-session`.
+
+**Edge cases that still need separate calls** (not the common path):
+
+- **Insert after the annotation's structural unit** (e.g. add a new step after a bullet): `apply-annotation`'s `insert-after` always uses the raw overlay edge — passing `unit` with insert returns an error. If you need "insert after the *list-item* containing this annotation", first call `claude-collab-get-region-bounds` with `unit: list-item` to get the snapped end, then `claude-collab-apply-edit` at that position. Resolve manually with `claude-collab-resolve-annotation`.
+- **Cross-annotation merges** ("combine with next"): when the merge spans two annotated regions, read both bounds via `get-region-bounds`, splice in chat, apply via `apply-edit`. Resolve both annotations.
+
+These don't fit the batch tool — handle them as one-off calls before or after the batch.
 
 ### Resolving CLARIFY markers
 

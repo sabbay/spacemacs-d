@@ -448,6 +448,363 @@ environment has no marginalia notes file configured."
     (should (string-prefix-p "Hello there,"
                              (with-current-buffer buf (buffer-string))))))
 
+;;; --- active plan tracking ---
+
+(defmacro claude-collab-test--with-plan-buffer (var-buf var-file &rest body)
+  "Create a temp .org file inside a `plans/' subdir; bind VAR-BUF and VAR-FILE.
+The directory tree is `<tmp>/<uniq>/plans/<name>.org', mirroring how a
+real plan file lives under a project's `plans/' subdir. Cleans up after
+recursively (org-remark may drop a marginalia notes file alongside)."
+  (declare (indent 2))
+  `(let* ((dir (make-temp-file "claude-collab-plan-" t))
+          (plans-dir (expand-file-name "plans" dir))
+          (,var-file (progn (make-directory plans-dir t)
+                            (expand-file-name "test-plan.org" plans-dir)))
+          (_ (with-temp-file ,var-file (insert "* Test\nbody\n")))
+          (,var-buf (find-file-noselect ,var-file)))
+     (unwind-protect
+         (with-current-buffer ,var-buf
+           (org-mode)
+           ,@body)
+       (when (buffer-live-p ,var-buf)
+         (with-current-buffer ,var-buf (set-buffer-modified-p nil))
+         (kill-buffer ,var-buf))
+       (when (file-directory-p dir) (delete-directory dir t)))))
+
+(ert-deftest claude-collab-test-plan-file-p ()
+  "claude-collab--plan-file-p matches `.org' under a `plans/' segment."
+  (should (claude-collab--plan-file-p "/repo/plans/x.org"))
+  (should (claude-collab--plan-file-p "/a/b/plans/foo.org"))
+  (should (claude-collab--plan-file-p "~/plans/y.org"))
+  (should-not (claude-collab--plan-file-p "/repo/plans/x.md"))
+  (should-not (claude-collab--plan-file-p "/repo/plans-archive/x.org"))
+  (should-not (claude-collab--plan-file-p "/repo/notes/x.org"))
+  (should-not (claude-collab--plan-file-p nil)))
+
+(ert-deftest claude-collab-test-active-plan-set-on-annotate ()
+  "claude-collab-add-annotation sets the active plan when buffer is a plan file."
+  (skip-unless (fboundp 'org-remark-highlight-mark))
+  (setq claude-collab--active-plan-file nil)
+  (claude-collab-test--with-plan-buffer buf file
+    (goto-char (point-min))
+    (search-forward "body")
+    (claude-collab-add-annotation (match-beginning 0) (match-end 0) "fix it")
+    (should (equal (expand-file-name file)
+                   (claude-collab-get-active-plan)))))
+
+(ert-deftest claude-collab-test-active-plan-ignores-non-plan ()
+  "Annotating a buffer outside a `plans/' dir leaves active-plan untouched."
+  (skip-unless (fboundp 'org-remark-highlight-mark))
+  (setq claude-collab--active-plan-file nil)
+  (let* ((dir (make-temp-file "claude-collab-other-" t))
+         (file (expand-file-name "loose.org" dir))
+         (_ (with-temp-file file (insert "* Loose\nbody\n")))
+         (buf (find-file-noselect file)))
+    (unwind-protect
+        (with-current-buffer buf
+          (org-mode)
+          (goto-char (point-min))
+          (search-forward "body")
+          (claude-collab-add-annotation (match-beginning 0) (match-end 0) "fix")
+          (should (null (claude-collab-get-active-plan))))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf (set-buffer-modified-p nil))
+        (kill-buffer buf))
+      (when (file-directory-p dir) (delete-directory dir t)))))
+
+(ert-deftest claude-collab-test-active-plan-stale-file-gc ()
+  "get-active-plan keeps the path while file exists; clears on file deletion."
+  (let* ((dir (make-temp-file "claude-collab-stale-" t))
+         (plans-dir (expand-file-name "plans" dir))
+         (_ (make-directory plans-dir t))
+         (file (expand-file-name "p.org" plans-dir))
+         (_ (with-temp-file file (insert "x\n"))))
+    (unwind-protect
+        (progn
+          (setq claude-collab--active-plan-file file)
+          ;; File exists, no buffer visits — kept (greenfield A2 fix).
+          (should (equal file (claude-collab-get-active-plan)))
+          ;; Delete file → cleared on next get.
+          (delete-file file)
+          (should (null (claude-collab-get-active-plan)))
+          (should (null claude-collab--active-plan-file)))
+      (when (file-directory-p dir) (delete-directory dir t)))))
+
+
+;;; --- bounds-aware apply-annotation ---
+
+(defmacro claude-collab-test--with-org-buffer (var-buf var-file content &rest body)
+  "Create a temp .org file with CONTENT, bind VAR-BUF and VAR-FILE."
+  (declare (indent 3))
+  `(let ((,var-file (make-temp-file "claude-collab-org-" nil ".org")))
+     (unwind-protect
+         (let ((,var-buf (find-file-noselect ,var-file)))
+           (unwind-protect
+               (with-current-buffer ,var-buf
+                 (erase-buffer)
+                 (insert ,content)
+                 (save-buffer)
+                 (org-mode)
+                 ,@body)
+             (when (buffer-live-p ,var-buf)
+               (with-current-buffer ,var-buf (set-buffer-modified-p nil))
+               (kill-buffer ,var-buf))))
+       (when (file-exists-p ,var-file) (delete-file ,var-file)))))
+
+(ert-deftest claude-collab-test-apply-annotation-list-item-unit ()
+  "Replacing with unit=:list-item swaps just the item, leaves siblings.
+Without trailing newline in new-text — auto-append must keep next item
+on its own line."
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-org-buffer buf _file
+      "* H1\n- item one\n- item two\n\n* H2\n"
+    (goto-char (point-min))
+    (search-forward "item one")
+    (let* ((b (match-beginning 0))
+           (e (match-end 0))
+           (id (claude-collab-test--fabricate-overlay-in buf b e))
+           ;; Pass new-text WITHOUT trailing newline — the auto-append must save us.
+           (result (claude-collab-apply-annotation
+                    id :replace "- replacement" :list-item)))
+      (should (plist-get result :ok))
+      (let ((content (with-current-buffer buf (buffer-string))))
+        ;; First item replaced, second item preserved.
+        (should (string-match-p "- replacement\n- item two" content))
+        (should-not (string-match-p "item one" content))
+        ;; H2 heading still on its own line, separated by a blank line.
+        (should (string-match-p "\n\n\\* H2\n" content))))))
+
+(ert-deftest claude-collab-test-apply-annotation-section-unit ()
+  "Replacing with unit=:section swaps the whole subtree, leaves siblings."
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-org-buffer buf _file
+      "* H1\nAlpha body line.\nAnother line.\n* H2\nBeta body.\n"
+    (goto-char (point-min))
+    (search-forward "Alpha")
+    (let* ((b (match-beginning 0))
+           (e (match-end 0))
+           (id (claude-collab-test--fabricate-overlay-in buf b e))
+           (result (claude-collab-apply-annotation
+                    id :replace "* H1 new\nrewritten body\n" :section)))
+      (should (plist-get result :ok))
+      (let ((content (with-current-buffer buf (buffer-string))))
+        (should (string-match-p "\\`\\* H1 new\nrewritten body\n" content))
+        (should-not (string-match-p "Alpha" content))
+        (should-not (string-match-p "Another line" content))
+        ;; Sibling intact.
+        (should (string-match-p "\\* H2\nBeta body\\." content))))))
+
+(ert-deftest claude-collab-test-apply-annotation-default-unit-unchanged ()
+  "Without unit arg, behavior matches the pre-unit contract (regression guard)."
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-temp-file buf _file
+    (let* ((id (claude-collab-test--fabricate-overlay-in buf 7 12))
+           (result (claude-collab-apply-annotation id :replace "there")))
+      (should (plist-get result :ok))
+      (should (= 7 (plist-get result :new-begin)))
+      (should (= 12 (plist-get result :new-end)))
+      (should (string-prefix-p "Hello there,"
+                               (with-current-buffer buf (buffer-string)))))))
+
+(ert-deftest claude-collab-test-apply-annotation-trailing-newline-autoappend ()
+  "ensure-trailing-newline appends `\\n' when snapped end sits on a newline boundary.
+Uses :section because its end always sits one past a newline."
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-org-buffer buf _file
+      "* H1\nbody line\n* H2\nbeta\n"
+    (goto-char (point-min))
+    (search-forward "body line")
+    (let* ((b (match-beginning 0))
+           (e (match-end 0))
+           (id (claude-collab-test--fabricate-overlay-in buf b e))
+           ;; Pass new-text without trailing `\n'. With :section, region-end is
+           ;; right after the trailing newline of section H1, so char-before is
+           ;; `\n' → ensure-trailing-newline appends one, keeping H2 on its line.
+           (result (claude-collab-apply-annotation
+                    id :replace "* H1\nrewritten" :section)))
+      (should (plist-get result :ok))
+      (let ((content (with-current-buffer buf (buffer-string))))
+        (should (string-match-p "rewritten\n\\* H2" content))))))
+
+;;; --- batch apply ---
+
+(ert-deftest claude-collab-test-apply-batch-applies-all ()
+  "apply-batch processes all edits in order, all succeed."
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-temp-file buf _file
+    ;; Three fabricated overlays at non-overlapping positions:
+    ;; 1: 1..6 ("Hello"), 2: 7..12 ("world"), 3: 14..18 ("this")
+    (let* ((id1 (claude-collab-test--fabricate-overlay-in buf 1 6))
+           (id2 (claude-collab-test--fabricate-overlay-in buf 7 12))
+           (id3 (claude-collab-test--fabricate-overlay-in buf 14 18))
+           (edits (list (list :id id1 :action :replace :new-text "Howdy")
+                        (list :id id2 :action :replace :new-text "there")
+                        (list :id id3 :action :replace :new-text "that")))
+           (result (claude-collab-apply-batch edits)))
+      (should (plist-get result :ok))
+      (should (= 3 (plist-get result :applied)))
+      (should (= 0 (plist-get result :failed)))
+      (let ((results (plist-get result :results)))
+        (should (= 3 (length results)))
+        (should (equal id1 (plist-get (nth 0 results) :id)))
+        (should (equal id2 (plist-get (nth 1 results) :id)))
+        (should (equal id3 (plist-get (nth 2 results) :id)))
+        (should (plist-get (nth 0 results) :ok)))
+      (should (string-prefix-p "Howdy there, that"
+                               (with-current-buffer buf (buffer-string)))))))
+
+(ert-deftest claude-collab-test-apply-batch-collects-failures ()
+  "apply-batch continues on per-edit error and reports them."
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-temp-file buf _file
+    (let* ((id1 (claude-collab-test--fabricate-overlay-in buf 1 6))
+           (edits (list (list :id id1 :action :replace :new-text "Howdy")
+                        (list :id "bogus-id" :action :replace :new-text "X")
+                        (list :action :replace :new-text "no-id")))
+           (result (claude-collab-apply-batch edits)))
+      (should-not (plist-get result :ok))
+      (should (= 1 (plist-get result :applied)))
+      (should (= 2 (plist-get result :failed)))
+      (let ((results (plist-get result :results)))
+        (should (plist-get (nth 0 results) :ok))
+        (should (plist-get (nth 1 results) :error))
+        (should (string-match-p "not found"
+                                (plist-get (nth 1 results) :error)))
+        (should (plist-get (nth 2 results) :error))
+        (should (string-match-p "Missing :id"
+                                (plist-get (nth 2 results) :error))))
+      ;; First edit landed despite later failures.
+      (should (string-prefix-p "Howdy"
+                               (with-current-buffer buf (buffer-string)))))))
+
+(ert-deftest claude-collab-test-apply-batch-with-mixed-units ()
+  "apply-batch supports per-edit units and structures stay intact."
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-org-buffer buf _file
+      "* H1\nbody one\n* H2\n- alpha\n- beta\n"
+    (goto-char (point-min))
+    (search-forward "body one")
+    (let* ((b1 (match-beginning 0))
+           (e1 (match-end 0))
+           (id1 (claude-collab-test--fabricate-overlay-in buf b1 e1))
+           (_ (search-forward "alpha"))
+           (b2 (match-beginning 0))
+           (e2 (match-end 0))
+           (id2 (claude-collab-test--fabricate-overlay-in buf b2 e2))
+           (edits (list (list :id id1 :action :replace
+                              :new-text "* H1\nrewritten H1 body\n"
+                              :unit :section)
+                        (list :id id2 :action :replace
+                              :new-text "- replacement"
+                              :unit :list-item)))
+           (result (claude-collab-apply-batch edits)))
+      (should (plist-get result :ok))
+      (should (= 2 (plist-get result :applied)))
+      (let ((content (with-current-buffer buf (buffer-string))))
+        (should (string-match-p "\\`\\* H1\nrewritten H1 body\n" content))
+        (should (string-match-p "\\* H2\n- replacement\n- beta\n" content))))))
+
+(ert-deftest claude-collab-test-apply-batch-empty ()
+  "apply-batch on empty edits returns ok with zero counts."
+  (claude-collab-test--reset-state)
+  (let ((result (claude-collab-apply-batch nil)))
+    (should (plist-get result :ok))
+    (should (= 0 (plist-get result :applied)))
+    (should (= 0 (plist-get result :failed)))
+    (should (null (plist-get result :results)))))
+
+
+;;; --- session logging + recovery ---
+
+(ert-deftest claude-collab-test-apply-annotation-logs-to-session ()
+  "apply-annotation logs the text edit into the current session so undo can revert it.
+Let-binds `claude-collab--inside-safe-eval' to nil to simulate the
+production MCP-tool path (the test runner itself runs inside safe-eval
+via eval-elisp, which would otherwise suppress per-edit logging)."
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-temp-file buf _file
+    (let* ((id (claude-collab-test--fabricate-overlay-in buf 7 12))
+           (sid (claude-collab--current-session-id))
+           (claude-collab--inside-safe-eval nil))
+      (claude-collab-apply-annotation id :replace "there")
+      (let* ((edits (claude-collab-session-edits sid))
+             (kinds (mapcar #'claude-collab-edit-kind edits)))
+        (should (memq 'text kinds))
+        (should (memq 'annotation-resolve kinds))))))
+
+(ert-deftest claude-collab-test-apply-batch-logs-each-edit ()
+  "apply-batch logs one text record per edit (plus annotation-resolves)."
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-temp-file buf _file
+    (let* ((id1 (claude-collab-test--fabricate-overlay-in buf 1 6))
+           (id2 (claude-collab-test--fabricate-overlay-in buf 7 12))
+           (id3 (claude-collab-test--fabricate-overlay-in buf 14 18))
+           (sid (claude-collab--current-session-id))
+           (edits (list (list :id id1 :action :replace :new-text "Howdy")
+                        (list :id id2 :action :replace :new-text "there")
+                        (list :id id3 :action :replace :new-text "that")))
+           (claude-collab--inside-safe-eval nil))
+      (claude-collab-apply-batch edits)
+      (let* ((records (claude-collab-session-edits sid))
+             (text-count (length (cl-remove-if-not
+                                   (lambda (e) (eq (claude-collab-edit-kind e) 'text))
+                                   records))))
+        (should (>= text-count 3))))))
+
+(ert-deftest claude-collab-test-undo-session-after-batch-restores-text ()
+  "After a batch, claude-collab--revert-session restores the original buffer content."
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-temp-file buf _file
+    (let* ((original (with-current-buffer buf (buffer-string)))
+           (id1 (claude-collab-test--fabricate-overlay-in buf 1 6))
+           (id2 (claude-collab-test--fabricate-overlay-in buf 7 12))
+           (sid (claude-collab--current-session-id))
+           (edits (list (list :id id1 :action :replace :new-text "Howdy")
+                        (list :id id2 :action :replace :new-text "there")))
+           (claude-collab--inside-safe-eval nil))
+      (claude-collab-apply-batch edits)
+      (should-not (string= original (with-current-buffer buf (buffer-string))))
+      (claude-collab--revert-session sid)
+      (should (string= original (with-current-buffer buf (buffer-string)))))))
+
+
+;;; --- error surfaces ---
+
+(ert-deftest claude-collab-test-paragraph-unit-in-org-errors ()
+  "apply-annotation with unit=:paragraph in org-mode returns :error."
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-org-buffer buf _file
+      "* H1\nbody line\n"
+    (goto-char (point-min))
+    (search-forward "body line")
+    (let* ((b (match-beginning 0))
+           (e (match-end 0))
+           (id (claude-collab-test--fabricate-overlay-in buf b e))
+           (result (claude-collab-apply-annotation id :replace "rewritten" :paragraph)))
+      (should (plist-get result :error))
+      (should (string-match-p ":section\\|list-item" (plist-get result :error))))))
+
+(ert-deftest claude-collab-test-section-unit-on-non-org-errors ()
+  "apply-annotation with unit=:section on a non-org buffer returns :error.
+Regression guard for the widened condition-case (Fix 3): the user-error
+from --bounds-for-unit must be caught and surfaced as :error, not bubble."
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-temp-file buf _file
+    (let* ((id (claude-collab-test--fabricate-overlay-in buf 7 12))
+           (result (claude-collab-apply-annotation id :replace "there" :section)))
+      (should (plist-get result :error))
+      (should (string-match-p "org-mode" (plist-get result :error))))))
+
+(ert-deftest claude-collab-test-apply-annotation-rejects-unit-with-insert ()
+  "apply-annotation with insert-after + non-default unit returns :error."
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-temp-file buf _file
+    (let* ((id (claude-collab-test--fabricate-overlay-in buf 7 12))
+           (result (claude-collab-apply-annotation id :insert-after "X" :section)))
+      (should (plist-get result :error))
+      (should (string-match-p "not allowed" (plist-get result :error))))))
+
+
 ;;; --- entry point ---
 
 (defun claude-collab-run-tests ()
