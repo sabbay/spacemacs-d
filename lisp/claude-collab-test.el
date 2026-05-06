@@ -242,10 +242,10 @@ Skips the calling test if `mcp-server-security-safe-eval' is not loaded
         (claude-collab-resolve-annotation-by-id ann-id))
       ;; After resolve: annotation should be gone
       (should (zerop (length (claude-collab--annotations-in-buffer buf))))
-      ;; Session should hold a record of kind 'annotation-resolve
+      ;; Session should hold a record that is the resolve variant.
       (let ((edits (claude-collab-session-edits 'test-session-7)))
         (should (= 1 (length edits)))
-        (should (eq 'annotation-resolve (claude-collab-edit-kind (car edits)))))
+        (should (claude-collab-edit-resolve-p (car edits))))
       ;; Undo: annotation re-appears
       (claude-collab--revert-session 'test-session-7)
       (should (= 1 (length (claude-collab--annotations-in-buffer buf)))))))
@@ -290,6 +290,33 @@ tests run even when org-remark isn't loaded."
       (overlay-put ov 'category 'org-remark-highlighter)
       (overlay-put ov 'org-remark-label "test-note")
       id)))
+
+(ert-deftest claude-collab-test-edit-adt-variants ()
+  "`claude-collab-edit' is the abstract base; instances are one of two
+variants. The `-p' predicates are mutually exclusive on a given record,
+both record types satisfy the base predicate, and the
+annotation-data slot is reachable only on the resolve variant — which
+is the structural reason the previous flat-struct + `kind' symbol
+made `--revert-edit' hide its consistency-check skip behind a cond."
+  (let ((text-edit (claude-collab-edit-text-create
+                    :buffer (current-buffer) :begin 1 :end 5
+                    :before-text "old" :after-text "new"))
+        (resolve-edit (claude-collab-edit-resolve-create
+                       :buffer (current-buffer) :begin 1 :end 5
+                       :annotation-data '(:id "x" :text "world"))))
+    ;; Both satisfy the base predicate.
+    (should (claude-collab-edit-p text-edit))
+    (should (claude-collab-edit-p resolve-edit))
+    ;; Variant predicates are exclusive.
+    (should (claude-collab-edit-text-p text-edit))
+    (should-not (claude-collab-edit-resolve-p text-edit))
+    (should (claude-collab-edit-resolve-p resolve-edit))
+    (should-not (claude-collab-edit-text-p resolve-edit))
+    ;; annotation-data lives only on the resolve variant.
+    (should (equal '(:id "x" :text "world")
+                   (claude-collab-edit-resolve-annotation-data resolve-edit)))
+    (should-error (claude-collab-edit-resolve-annotation-data text-edit)
+                  :type 'wrong-type-argument)))
 
 (ert-deftest claude-collab-test-apply-annotation-pre-edit-fingerprint ()
   "apply-annotation result carries a :pre-edit plist so postmortem can
@@ -1071,10 +1098,9 @@ via eval-elisp, which would otherwise suppress per-edit logging)."
            (sid (claude-collab--current-session-id))
            (claude-collab--inside-safe-eval nil))
       (claude-collab-apply-annotation id :replace "there")
-      (let* ((edits (claude-collab-session-edits sid))
-             (kinds (mapcar #'claude-collab-edit-kind edits)))
-        (should (memq 'text kinds))
-        (should (memq 'annotation-resolve kinds))))))
+      (let ((edits (claude-collab-session-edits sid)))
+        (should (cl-some #'claude-collab-edit-text-p edits))
+        (should (cl-some #'claude-collab-edit-resolve-p edits))))))
 
 (ert-deftest claude-collab-test-apply-batch-logs-each-edit ()
   "apply-batch logs one text record per edit (plus annotation-resolves)."
@@ -1091,7 +1117,7 @@ via eval-elisp, which would otherwise suppress per-edit logging)."
       (claude-collab-apply-batch edits)
       (let* ((records (claude-collab-session-edits sid))
              (text-count (length (cl-remove-if-not
-                                   (lambda (e) (eq (claude-collab-edit-kind e) 'text))
+                                   #'claude-collab-edit-text-p
                                    records))))
         (should (>= text-count 3))))))
 

@@ -23,10 +23,35 @@
 (require 'cl-lib)
 (require 'claude-collab-core)
 
+;; `claude-collab-edit' is the abstract base — we only ever instantiate
+;; one of the two variants below. Splitting it as an algebraic data type
+;; \(rather than a flat struct with a `kind' symbol slot + a free-form
+;; `annotation-data' plist that's only meaningful when kind is one
+;; specific value) makes the per-variant invariants checkable: text
+;; edits have a (before, after) pair and a buffer region; resolve edits
+;; have annotation metadata and a re-mark target. The DDD audit's I3
+;; finding that `--revert-edit' silently skipped the consistency check
+;; for `annotation-resolve' was the symptom of one struct trying to be
+;; two things; now `--revert-edit' pcase-dispatches on the variant
+;; and the per-variant logic is local.
 (cl-defstruct claude-collab-edit
   session-id buffer buffer-name begin end
-  before-text after-text timestamp overlay
-  kind annotation-data)
+  before-text after-text timestamp overlay)
+
+(cl-defstruct (claude-collab-edit-text
+               (:include claude-collab-edit)
+               (:constructor claude-collab-edit-text-create))
+  "A buffer-region mutation: BEFORE-TEXT was at BEGIN..END, the edit
+replaced it with AFTER-TEXT (which may be empty for a delete or
+non-empty for replace/insert).")
+
+(cl-defstruct (claude-collab-edit-resolve
+               (:include claude-collab-edit)
+               (:constructor claude-collab-edit-resolve-create))
+  "The bookkeeping side-effect of dropping an annotation overlay.
+ANNOTATION-DATA carries the original highlighted text + label so
+the overlay can be re-marked on undo."
+  annotation-data)
 
 (defvar claude-collab--sessions (make-hash-table :test 'equal)
   "Hash table: session-id -> list of `claude-collab-edit' (newest first).")
@@ -131,24 +156,31 @@ estate) does NOT demote the active plan."
 ;;; Edit logging + MCP advice
 
 (defun claude-collab--log-edit (buf beg end before-text &optional kind annotation-data)
-  "Create and store an edit record, installing an overlay. Return the record."
+  "Create and store an edit record, installing an overlay. Return the record.
+KIND is `'text' (default) or `'annotation-resolve'; each maps to the
+appropriate `claude-collab-edit-*' variant constructor. The flat
+`kind'-symbol arg survives for back-compat with `--edit-region' and
+the eval-elisp record-advice; new callers should pass the proper
+keyword and the dispatch picks the variant."
   (with-current-buffer buf
     (let* ((session-id (claude-collab--current-session-id))
            (annotation-kind (eq kind 'annotation-resolve))
            (after-text (if annotation-kind "" (buffer-substring-no-properties beg end)))
            (ov (unless annotation-kind (make-overlay beg end buf nil t)))
-           (rec (make-claude-collab-edit
-                 :session-id session-id
-                 :buffer buf
-                 :buffer-name (buffer-name buf)
-                 :begin (if (markerp beg) beg (copy-marker beg nil))
-                 :end (if (markerp end) end (copy-marker end t))
-                 :before-text before-text
-                 :after-text after-text
-                 :timestamp (float-time)
-                 :overlay ov
-                 :kind (or kind 'text)
-                 :annotation-data annotation-data)))
+           (shared (list :session-id session-id
+                         :buffer buf
+                         :buffer-name (buffer-name buf)
+                         :begin (if (markerp beg) beg (copy-marker beg nil))
+                         :end (if (markerp end) end (copy-marker end t))
+                         :before-text before-text
+                         :after-text after-text
+                         :timestamp (float-time)
+                         :overlay ov))
+           (rec (if annotation-kind
+                    (apply #'claude-collab-edit-resolve-create
+                           (append shared
+                                   (list :annotation-data annotation-data)))
+                  (apply #'claude-collab-edit-text-create shared))))
       (when ov
         (overlay-put ov 'face (and claude-collab-show-overlays 'claude-edit-face))
         (overlay-put ov 'claude-collab-edit rec)
@@ -271,32 +303,38 @@ doesn't fragment into dozens of character-level overlays."
 ;;; Revert / accept
 
 (defun claude-collab--revert-edit (edit)
-  "Revert EDIT. Signal `claude-collab-conflict' if region changed."
-  (let ((buf (claude-collab-edit-buffer edit))
-        (beg (claude-collab-edit-begin edit))
-        (end (claude-collab-edit-end edit))
-        (before (claude-collab-edit-before-text edit))
-        (after (claude-collab-edit-after-text edit))
-        (ov (claude-collab-edit-overlay edit))
-        (kind (claude-collab-edit-kind edit)))
-    (cond
-     ((eq kind 'annotation-resolve)
-      (claude-collab--unresolve-annotation edit))
-     (t
-      (unless (buffer-live-p buf)
-        (signal 'claude-collab-conflict
-                (list (format "buffer %s killed"
-                              (claude-collab-edit-buffer-name edit)))))
-      (with-current-buffer buf
-        (let ((current (buffer-substring-no-properties beg end)))
-          (unless (string= current after)
-            (signal 'claude-collab-conflict
-                    (list (format "region at %s:%d modified since edit"
-                                  (buffer-name buf) (marker-position beg)))))
-          (let ((inhibit-modification-hooks t))
-            (delete-region beg end)
-            (goto-char beg)
-            (insert before))))))
+  "Revert EDIT. Signal `claude-collab-conflict' if region changed.
+Pcase-dispatches on the edit's struct variant: text edits run the
+\(before, after) consistency check on the buffer region and undo the
+mutation; annotation-resolve edits delegate to `--unresolve-annotation'
+which re-marks the highlight (the resolve only removed an overlay,
+it didn't mutate text — no buffer-state check is meaningful)."
+  (let ((ov (claude-collab-edit-overlay edit)))
+    (pcase edit
+      ((pred claude-collab-edit-resolve-p)
+       (claude-collab--unresolve-annotation edit))
+      ((pred claude-collab-edit-text-p)
+       (let ((buf (claude-collab-edit-buffer edit))
+             (beg (claude-collab-edit-begin edit))
+             (end (claude-collab-edit-end edit))
+             (before (claude-collab-edit-before-text edit))
+             (after (claude-collab-edit-after-text edit)))
+         (unless (buffer-live-p buf)
+           (signal 'claude-collab-conflict
+                   (list (format "buffer %s killed"
+                                 (claude-collab-edit-buffer-name edit)))))
+         (with-current-buffer buf
+           (let ((current (buffer-substring-no-properties beg end)))
+             (unless (string= current after)
+               (signal 'claude-collab-conflict
+                       (list (format "region at %s:%d modified since edit"
+                                     (buffer-name buf) (marker-position beg)))))
+             (let ((inhibit-modification-hooks t))
+               (delete-region beg end)
+               (goto-char beg)
+               (insert before))))))
+      (_ (signal 'claude-collab-conflict
+                 (list (format "Unknown edit variant: %S" (type-of edit))))))
     (when (overlayp ov) (delete-overlay ov))))
 
 (defun claude-collab--revert-session (session-id)
@@ -587,8 +625,10 @@ a successful end state."
           data))))))
 
 (defun claude-collab--unresolve-annotation (edit)
-  "Re-apply an annotation that was resolved as part of an undone session."
-  (let* ((data (claude-collab-edit-annotation-data edit))
+  "Re-apply an annotation that was resolved as part of an undone session.
+EDIT must be a `claude-collab-edit-resolve' record — that's the only
+variant that carries the `annotation-data' slot."
+  (let* ((data (claude-collab-edit-resolve-annotation-data edit))
          (file (plist-get data :file))
          (beg (plist-get data :begin))
          (end (plist-get data :end))
@@ -1592,15 +1632,15 @@ card and open a `diff-mode' side-window instead."
 
 (defun claude-collab--diff-summary (edit)
   "One-line summary describing the scale of EDIT."
-  (cond
-   ((eq (claude-collab-edit-kind edit) 'annotation-resolve)
-    "resolved annotation")
-   (t
-    (let* ((before (or (claude-collab-edit-before-text edit) ""))
-           (after  (or (claude-collab-edit-after-text edit) ""))
-           (bl (length (split-string before "\n")))
-           (al (length (split-string after "\n"))))
-      (format "−%d  +%d lines" bl al)))))
+  (pcase edit
+    ((pred claude-collab-edit-resolve-p) "resolved annotation")
+    ((pred claude-collab-edit-text-p)
+     (let* ((before (or (claude-collab-edit-before-text edit) ""))
+            (after  (or (claude-collab-edit-after-text edit) ""))
+            (bl (length (split-string before "\n")))
+            (al (length (split-string after "\n"))))
+       (format "−%d  +%d lines" bl al)))
+    (_ "unknown edit variant")))
 
 (defun claude-collab--edit-is-big-p (edit)
   "Non-nil when EDIT's diff should escalate to the side-window."
