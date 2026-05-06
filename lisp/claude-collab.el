@@ -553,27 +553,38 @@ first, decides if drift is acceptable, then applies."
    (claude-collab--file-buffers)))
 
 (defun claude-collab-resolve-annotation-by-id (id)
-  "Remove annotation ID and log a session-scoped record for undo-coupling."
+  "Remove annotation ID and log a session-scoped record for undo-coupling.
+Idempotent: if no overlay is found for ID, the annotation is already
+gone — return (:already-resolved t :id ID) instead of signaling. This
+matters because `apply-annotation' calls us as the auto-resolve step
+*after* mutating + saving the buffer, and `org-remark''s
+`after-save-hook' frequently disposes of overlays that have collapsed
+or been displaced by the edit. Treating that as failure would trigger
+the transactional rollback in `apply-annotation' for what is in fact
+a successful end state."
   (claude-collab--with-mcp-log "resolve-annotation" (list :id id)
     (let ((found (claude-collab--find-annotation id)))
-      (unless found (error "Annotation %s not found" id))
-      (let* ((buf (car found))
-             (ov (cdr found))
-             (beg (overlay-start ov))
-             (end (overlay-end ov))
-             (label (overlay-get ov 'org-remark-label))
-             (file (buffer-file-name buf))
-             (data (list :id id :file file :begin beg :end end :label label
-                         :text (with-current-buffer buf
-                                 (buffer-substring-no-properties beg end)))))
-        (claude-collab--log-edit buf beg end "" 'annotation-resolve data)
-        (with-current-buffer buf
-          (save-excursion
-            (goto-char beg)
-            (if (fboundp 'org-remark-delete)
-                (ignore-errors (org-remark-delete beg))
-              (delete-overlay ov))))
-        data))))
+      (cond
+       ((not found)
+        (list :already-resolved t :id id))
+       (t
+        (let* ((buf (car found))
+               (ov (cdr found))
+               (beg (overlay-start ov))
+               (end (overlay-end ov))
+               (label (overlay-get ov 'org-remark-label))
+               (file (buffer-file-name buf))
+               (data (list :id id :file file :begin beg :end end :label label
+                           :text (with-current-buffer buf
+                                   (buffer-substring-no-properties beg end)))))
+          (claude-collab--log-edit buf beg end "" 'annotation-resolve data)
+          (with-current-buffer buf
+            (save-excursion
+              (goto-char beg)
+              (if (fboundp 'org-remark-delete)
+                  (ignore-errors (org-remark-delete beg))
+                (delete-overlay ov))))
+          data))))))
 
 (defun claude-collab--unresolve-annotation (edit)
   "Re-apply an annotation that was resolved as part of an undone session."
@@ -702,7 +713,7 @@ as breadcrumbs for postmortem grep over the JSONL log."
                   :code :unit-not-allowed))
            (t
             (condition-case err
-                (let* (region-beg region-end new-begin new-end
+                (let* (region-beg region-end new-begin new-end revert-before-text
                        (pre-edit (claude-collab--pre-edit-fingerprint id ov buf))
                        (drift-kind (and pre-edit (plist-get pre-edit :drift))))
                   ;; Drift precondition. Strict by default; FORCE bypasses.
@@ -730,22 +741,33 @@ as breadcrumbs for postmortem grep over the JSONL log."
                        (t
                         (let ((b (claude-collab--bounds-for-unit ov unit)))
                           (setq region-beg (car b) region-end (cdr b))))))
+                    ;; Rollback bookkeeping: the bytes that need to land
+                    ;; back at NEW-BEGIN if auto-resolve fails. Per-action
+                    ;; because :insert-{before,after} creates new content
+                    ;; at a 0-width point (revert = delete only) while
+                    ;; :replace / :delete have prior content to restore.
                     (pcase action
                       (:replace
+                       (setq revert-before-text
+                             (buffer-substring-no-properties region-beg region-end))
                        (let ((amended (claude-collab--ensure-trailing-newline
                                        region-end new-text)))
                          (claude-collab--edit-region buf region-beg region-end amended)
                          (setq new-begin region-beg
                                new-end (+ region-beg (length amended)))))
                       (:insert-before
+                       (setq revert-before-text "")
                        (claude-collab--edit-region buf region-beg region-beg new-text)
                        (setq new-begin region-beg
                              new-end (+ region-beg (length new-text))))
                       (:insert-after
+                       (setq revert-before-text "")
                        (claude-collab--edit-region buf region-end region-end new-text)
                        (setq new-begin region-end
                              new-end (+ region-end (length new-text))))
                       (:delete
+                       (setq revert-before-text
+                             (buffer-substring-no-properties region-beg region-end))
                        (claude-collab--edit-region buf region-beg region-end "")
                        (setq new-begin region-beg
                              new-end region-beg))
@@ -757,13 +779,35 @@ as breadcrumbs for postmortem grep over the JSONL log."
                               (progn (claude-collab-resolve-annotation-by-id id) t)
                             (error (setq resolve-error (error-message-string err))
                                    nil))))
-                    (append
-                     (list :ok t
-                           :new-begin new-begin
-                           :new-end new-end
-                           :resolved resolved)
-                     (and resolve-error (list :resolve-error resolve-error))
-                     (and pre-edit (list :pre-edit pre-edit)))))
+                    (cond
+                     (resolved
+                      (append
+                       (list :ok t
+                             :new-begin new-begin
+                             :new-end new-end
+                             :resolved t)
+                       (and pre-edit (list :pre-edit pre-edit))))
+                     (t
+                      ;; Transactional rollback: edit + auto-resolve form
+                      ;; one unit-of-work. If resolve fails, the edit is
+                      ;; undone here so the agent sees a clean failure
+                      ;; rather than `:ok t :resolved nil' (which the
+                      ;; previous shape returned — half-applied state
+                      ;; that retry logic couldn't reason about).
+                      (with-current-buffer buf
+                        (let ((inhibit-modification-hooks t))
+                          (delete-region new-begin new-end)
+                          (goto-char new-begin)
+                          (insert revert-before-text))
+                        (save-buffer))
+                      (append
+                       (list :error
+                             (format "Auto-resolve failed; edit reverted. Cause: %s"
+                                     resolve-error)
+                             :code :resolve-failed
+                             :resolve-error resolve-error)
+                       (and pre-edit (list :pre-edit pre-edit))))))
+                  )
               (error (list :error (error-message-string err)
                            :code :unknown)))))))))))
 

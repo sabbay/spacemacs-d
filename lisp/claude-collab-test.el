@@ -364,6 +364,30 @@ can land. The assertion is `:ok t', not just `not :drift'."
       (should (plist-get result :ok))
       (should-not (eq :drift (plist-get result :code))))))
 
+(ert-deftest claude-collab-test-apply-annotation-transactional-rollback ()
+  "When auto-resolve throws after a successful edit, the edit gets
+reverted — buffer ends up in pre-edit state, result is
+\(:error :code :resolve-failed). The unit-of-work guarantee replaces
+the previous half-applied `:ok t :resolved nil :resolve-error MSG'
+shape that confused agent retry logic."
+  (skip-unless (fboundp 'org-remark-highlight-mark))
+  (claude-collab-test--with-temp-file buf _file
+    (with-current-buffer buf
+      (org-remark-highlight-mark 7 12 nil nil "x")
+      (save-buffer))
+    (let* ((id (plist-get (car (claude-collab--annotations-in-buffer buf)) :id))
+           (snapshot-before (with-current-buffer buf (buffer-string))))
+      (cl-letf (((symbol-function 'claude-collab-resolve-annotation-by-id)
+                 (lambda (_id) (error "stubbed resolve failure"))))
+        (let* ((result (claude-collab-apply-annotation id :replace "DOES-NOT-PERSIST"))
+               (snapshot-after (with-current-buffer buf (buffer-string))))
+          (should (plist-get result :error))
+          (should (eq :resolve-failed (plist-get result :code)))
+          (should (equal "stubbed resolve failure" (plist-get result :resolve-error)))
+          ;; Critical: buffer is rolled back to pre-edit state.
+          (should (string= snapshot-before snapshot-after))
+          (should-not (string-match-p "DOES-NOT-PERSIST" snapshot-after)))))))
+
 (ert-deftest claude-collab-test-apply-annotation-drift-ambiguous-via-adapter ()
   "When the anchor's text appears multiple times in the buffer and no
 context disambiguates, drift must surface as `:drift-kind :ambiguous'
@@ -492,33 +516,28 @@ the /design revise drift incident."
   (with-current-buffer (claude-collab--mcp-log-buffer)
     (should (string-empty-p (buffer-string)))))
 
-(ert-deftest claude-collab-test-apply-annotation-resolve-error-surfaces ()
-  "When auto-resolve fails after a successful edit, the result carries
-the resolve-error message instead of silently reporting :resolved nil
-with no diagnostic."
-  (claude-collab-test--reset-state)
-  (claude-collab-test--with-temp-file buf _file
-    (let ((id (claude-collab-test--fabricate-overlay-in buf 7 12)))
-      ;; Force resolve to fail by stubbing it.
-      (cl-letf (((symbol-function 'claude-collab-resolve-annotation-by-id)
-                 (lambda (_id) (error "stubbed resolve failure"))))
-        (let ((result (claude-collab-apply-annotation id :replace "there")))
-          (should (plist-get result :ok))
-          (should (null (plist-get result :resolved)))
-          (should (equal "stubbed resolve failure"
-                         (plist-get result :resolve-error))))))))
+;; The old `apply-annotation-resolve-error-surfaces' test asserted the
+;; pre-transactional shape `(:ok t :resolved nil :resolve-error MSG)'
+;; — a half-applied buffer state that confused agent retry logic. Now
+;; superseded by `apply-annotation-transactional-rollback' which proves
+;; the buffer is rolled back AND the result is `:error :code
+;; :resolve-failed' (clean failure, not partial success).
 
 (ert-deftest claude-collab-test-mcp-log-records-error ()
-  "MCP handler errors land in the log buffer with an :error: line."
+  "Errors signaled inside `claude-collab--with-mcp-log' get logged
+with an `ERROR' marker, the args, and the error message — direct
+test of the macro's error path so it doesn't depend on which
+handler happens to raise."
   (claude-collab-clear-log)
   (condition-case _err
-      (claude-collab--mcp-resolve-annotation '((id . "definitely-not-a-real-id")))
+      (claude-collab--with-mcp-log "test-tool" '(:probe t)
+        (error "kaboom"))
     (error nil))
   (with-current-buffer (claude-collab--mcp-log-buffer)
     (let ((s (buffer-string)))
-      (should (string-match-p "resolve-annotation" s))
+      (should (string-match-p "test-tool" s))
       (should (string-match-p "ERROR" s))
-      (should (string-match-p "definitely-not-a-real-id" s)))))
+      (should (string-match-p "kaboom" s)))))
 
 (ert-deftest claude-collab-test-apply-annotation-replace ()
   "apply-annotation :replace swaps the annotated region and auto-resolves."
