@@ -309,6 +309,50 @@ spot drift retrospectively. With matching marginalia text, :drift is nil."
       (should (stringp (plist-get pe :existing-prefix)))
       (should (null (plist-get pe :drift))))))
 
+(ert-deftest claude-collab-test-apply-annotation-aborts-on-drift ()
+  "If marginalia's anchor text no longer locates uniquely in the buffer,
+`apply-annotation' refuses to mutate and returns :error :code :drift —
+the structural prevention of the original `:verify:'-line splice.
+
+Strategy: save once to commit marginalia's record of `world' at 7..12,
+then mutate the buffer destructively *without* a second save. Marginalia
+keeps the original anchor text on disk; the source buffer doesn't.
+Drift detector compares marginalia anchor against live buffer text."
+  (skip-unless (fboundp 'org-remark-highlight-mark))
+  (claude-collab-test--with-temp-file buf _file
+    (with-current-buffer buf
+      (org-remark-highlight-mark 7 12 nil nil "test-note")
+      (save-buffer)
+      ;; Drop the annotated text without saving — keeps marginalia
+      ;; anchored to the original `world' while the live buffer no
+      ;; longer contains it.
+      (goto-char 7)
+      (delete-region 7 12)
+      (insert "PHANTOM"))
+    (let* ((id (plist-get (car (claude-collab--annotations-in-buffer buf)) :id))
+           (result (claude-collab-apply-annotation id :replace "BANG")))
+      (should (plist-get result :error))
+      (should (eq :drift (plist-get result :code)))
+      (should (eq :not-found (plist-get result :drift-kind))))))
+
+(ert-deftest claude-collab-test-apply-annotation-force-bypasses-drift ()
+  "When FORCE is non-nil the drift guard is skipped — used by callers
+that have reasoned about the drift and accept the risk."
+  (skip-unless (fboundp 'org-remark-highlight-mark))
+  (claude-collab-test--with-temp-file buf _file
+    (with-current-buffer buf
+      (org-remark-highlight-mark 7 12 nil nil "test-note")
+      (save-buffer)
+      (goto-char 7)
+      (delete-region 7 12)
+      (insert "PHANTOM"))
+    (let* ((id (plist-get (car (claude-collab--annotations-in-buffer buf)) :id))
+           ;; force=t bypasses the precondition. The edit may still hit
+           ;; an unrelated error path (overlay collapsed, etc.) but it
+           ;; will NOT be the drift one.
+           (result (claude-collab-apply-annotation id :replace "BANG" nil t)))
+      (should-not (eq :drift (plist-get result :code))))))
+
 (ert-deftest claude-collab-test-mcp-log-captures-internal-calls ()
   "Logging on the public function (not the MCP handler) means a direct
 call to `claude-collab-apply-annotation' from elisp lands in the log —

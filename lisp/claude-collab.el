@@ -450,7 +450,15 @@ file). A whitespace-only body is treated as nil."
 (defun claude-collab--annotations-in-buffer (buf)
   "Return list of annotation plists in BUF.
 Reads via `org-remark-highlights-get' from the notes buffer so the
-label round-trips across save/reload — overlay props don't."
+label round-trips across save/reload — overlay props don't.
+
+Each plist carries an `:anchor' key — a plist-shaped serialization of
+a `claude-collab-core-anchor' suitable for round-tripping through MCP.
+Marginalia today only stores `:original-text', so the anchor's
+context fields default to empty; consumers calling
+`claude-collab-core-anchor-from-marginalia' on the `:anchor' value
+will get text-only matching, which still resolves uniquely for the
+common case of distinct CLARIFY blocks."
   (when (buffer-live-p buf)
     (with-current-buffer buf
       (when (and (buffer-file-name)
@@ -462,13 +470,17 @@ label round-trips across save/reload — overlay props don't."
                                (find-file-noselect notes-file))))
           (when notes-buf
             (mapcar (lambda (h)
-                      (let ((loc (plist-get h :location)))
+                      (let* ((loc (plist-get h :location))
+                             (text (plist-get (plist-get h :props) :original-text)))
                         (list :id (plist-get h :id)
                               :file (buffer-file-name)
                               :begin (car loc)
                               :end (cdr loc)
-                              :text (plist-get (plist-get h :props) :original-text)
-                              :label (claude-collab--annotation-note h))))
+                              :text text
+                              :label (claude-collab--annotation-note h)
+                              :anchor (list :text (or text "")
+                                            :context-before ""
+                                            :context-after ""))))
                     (org-remark-highlights-get notes-buf))))))))
 
 (defun claude-collab-pending-annotations (file)
@@ -479,6 +491,53 @@ label round-trips across save/reload — overlay props don't."
 (defun claude-collab--all-annotations ()
   "Return all pending annotations across tracked buffers."
   (cl-mapcan #'claude-collab--annotations-in-buffer (claude-collab--file-buffers)))
+
+(defun claude-collab-check-anchor (id)
+  "Read-only: report whether annotation ID's anchor still locates uniquely.
+
+Returns a plist:
+
+  (:ok t :exists t :file F :drift KIND|nil :diagnosis PLIST :anchor PLIST
+   :overlay-bounds (BEG . END))
+
+  (:ok t :exists nil :error MSG)   when ID isn't found in any tracked buffer
+
+KIND is `:not-found' / `:ambiguous' / nil(=clean). When KIND is non-nil,
+DIAGNOSIS carries the candidate regions (for `:ambiguous') so the agent
+can pick a winner before retrying. The companion of
+`claude-collab-apply-annotation' with FORCE=t — the agent calls this
+first, decides if drift is acceptable, then applies."
+  (claude-collab--with-mcp-log "check-anchor" (list :id id)
+    (let ((found (claude-collab--find-annotation id)))
+      (cond
+       ((not found)
+        (list :ok t :exists nil
+              :error (format "Annotation %s not found in any tracked buffer" id)))
+       (t
+        (let* ((buf (car found))
+               (ov (cdr found))
+               (entry (cl-find id (claude-collab--annotations-in-buffer buf)
+                               :key (lambda (a) (plist-get a :id))
+                               :test #'string=))
+               (anchor (and entry
+                            (claude-collab-core-anchor-from-marginalia
+                             (plist-get entry :anchor))))
+               (source (with-current-buffer buf
+                         (buffer-substring-no-properties (point-min) (point-max))))
+               (drift-result (and anchor
+                                  (claude-collab-core-detect-drift source anchor))))
+          (list :ok t :exists t
+                :file (buffer-file-name buf)
+                :overlay-bounds (cons (overlay-start ov) (overlay-end ov))
+                :anchor (and entry (plist-get entry :anchor))
+                :drift (cond
+                        ((eq drift-result :clean) nil)
+                        ((and (consp drift-result)
+                              (eq (car drift-result) :drifted))
+                         (plist-get (cdr drift-result) :reason)))
+                :diagnosis (and (consp drift-result)
+                                (eq (car drift-result) :drifted)
+                                (plist-get (cdr drift-result) :diagnosis)))))))))
 
 (defun claude-collab--find-annotation (id)
   "Return (buf . overlay) for annotation ID, or nil."
@@ -578,7 +637,7 @@ the possibly-amended string. Buffer must be current."
       (concat new-text "\n")
     new-text))
 
-(defun claude-collab-apply-annotation (id action &optional new-text unit)
+(cl-defun claude-collab-apply-annotation (id action &optional new-text unit force)
   "Apply ACTION to the annotation with ID, optionally using NEW-TEXT.
 ACTION is one of :replace, :insert-before, :insert-after, :delete.
 Uses the live overlay's current bounds (not the stored :begin/:end,
@@ -595,22 +654,28 @@ an error. For :replace, when the snapped end sits on a newline boundary,
 NEW-TEXT gets a trailing newline auto-appended if missing — guards
 against the most common org-structure damage.
 
+Drift is a precondition. Before computing region bounds, the function
+runs `claude-collab-core-detect-drift' over the live buffer and the
+marginalia-derived anchor. If the anchor no longer locates uniquely
+in the source — the structural cause of the original `:verify:'-line
+splice incident — the function aborts with
+\(:error MSG :code :drift :drift-diag PLIST) and the buffer is left
+untouched. Pass FORCE non-nil to bypass the guard (use sparingly:
+this is the unsafe path that produced the original drift).
+
 Returns a plist (:ok t :new-begin N :new-end M :resolved t|nil) or
-a plist (:error MSG) on failure. The result also carries a `:pre-edit'
-plist with the bounds and a 200-char prefix of (i) what was at the
-overlay at edit-time and (ii) what marginalia recorded as
-`:org-remark-original-text:'. `:drift t' in `:pre-edit' means those two
-disagreed — the overlay no longer covers the text it was created on,
-and the edit just landed on whatever happens to be there. Surfacing
-this in the log is what lets us detect drift retrospectively without
-sanity-aborting yet."
+a plist (:error MSG ...) on failure. Successful results also carry a
+`:pre-edit' plist with overlay bounds and 200-char prefixes of both
+the live buffer and the marginalia-recorded original-text — preserved
+as breadcrumbs for postmortem grep over the JSONL log."
   (claude-collab--with-mcp-log "apply-annotation"
                                (list :id id :action action
                                      :new-text-prefix
                                      (and (stringp new-text)
                                           (substring new-text 0
                                                      (min 80 (length new-text))))
-                                     :unit unit)
+                                     :unit unit
+                                     :force force)
     (let* ((action (claude-collab-core-normalize-action action))
            (unit (claude-collab-core-normalize-unit unit))
            (found (claude-collab--find-annotation id)))
@@ -635,7 +700,22 @@ sanity-aborting yet."
            (t
             (condition-case err
                 (let* (region-beg region-end new-begin new-end
-                       (pre-edit (claude-collab--pre-edit-fingerprint id ov buf)))
+                       (pre-edit (claude-collab--pre-edit-fingerprint id ov buf))
+                       (drift-kind (and pre-edit (plist-get pre-edit :drift))))
+                  ;; Drift precondition. Strict by default; FORCE bypasses.
+                  (when (and drift-kind (not force))
+                    (cl-return-from claude-collab-apply-annotation
+                      (list :error
+                            (format "Drift detected on %s: anchor %s in source"
+                                    id
+                                    (pcase drift-kind
+                                      (:not-found "no longer present")
+                                      (:ambiguous "no longer unique")
+                                      (_ "in unknown drift state")))
+                            :code :drift
+                            :drift-kind drift-kind
+                            :drift-diag (plist-get pre-edit :drift-diagnosis)
+                            :pre-edit pre-edit)))
                   (with-current-buffer buf
                     (let ((ov-beg (overlay-start ov))
                           (ov-end (overlay-end ov)))
@@ -685,33 +765,55 @@ sanity-aborting yet."
 
 (defun claude-collab--pre-edit-fingerprint (id ov buf)
   "Snapshot what the overlay covers right before the edit lands.
+
 Returns plist (:overlay-beg N :overlay-end M :existing-prefix S
-:marginalia-original-prefix S :drift t|nil), or nil on failure to read.
-Use the resulting `:drift' field to retrospectively detect that an
-overlay no longer covers the text it was anchored to."
+:marginalia-original-prefix S :drift KW|nil :drift-diagnosis PLIST),
+or nil on failure to read.
+
+The canonical drift signal is `:drift' — `nil' (clean, anchor still
+locates uniquely), `:not-found' (anchor's text no longer in source),
+or `:ambiguous' (anchor's text appears multiple times and context
+can't disambiguate). This is computed by
+`claude-collab-core-detect-drift' over the live buffer string plus
+the marginalia-derived anchor; the overlay bounds and existing-prefix
+fields are preserved as breadcrumbs for postmortem grep but no longer
+drive any decision."
   (condition-case nil
       (let* ((ov-beg (overlay-start ov))
              (ov-end (overlay-end ov))
              (cap 200)
+             (anns (claude-collab--annotations-in-buffer buf))
+             (entry (cl-find id anns
+                             :key (lambda (a) (plist-get a :id))
+                             :test #'string=))
+             (anchor (when entry
+                       (claude-collab-core-anchor-from-marginalia
+                        (plist-get entry :anchor))))
+             (source (with-current-buffer buf
+                       (buffer-substring-no-properties (point-min) (point-max))))
+             (drift-result (and anchor (claude-collab-core-detect-drift source anchor)))
+             (drift-kind (cond
+                          ((eq drift-result :clean) nil)
+                          ((and (consp drift-result)
+                                (eq (car drift-result) :drifted))
+                           (plist-get (cdr drift-result) :reason))))
+             (drift-diag (and (consp drift-result)
+                              (eq (car drift-result) :drifted)
+                              (plist-get (cdr drift-result) :diagnosis)))
              (existing
               (with-current-buffer buf
                 (buffer-substring-no-properties
                  ov-beg (min ov-end (+ ov-beg cap)))))
-             (marg-text
-              (let* ((anns (claude-collab--annotations-in-buffer buf))
-                     (a (cl-find id anns
-                                 :key (lambda (a) (plist-get a :id))
-                                 :test #'string=)))
-                (and a (plist-get a :text))))
+             (marg-text (and entry (plist-get entry :text)))
              (marg-prefix (and marg-text
-                                (substring marg-text 0
-                                           (min cap (length marg-text))))))
+                               (substring marg-text 0
+                                          (min cap (length marg-text))))))
         (list :overlay-beg ov-beg
               :overlay-end ov-end
               :existing-prefix existing
               :marginalia-original-prefix marg-prefix
-              :drift (and marg-prefix
-                          (not (string= existing marg-prefix)))))
+              :drift drift-kind
+              :drift-diagnosis drift-diag))
     (error nil)))
 
 (defun claude-collab--trim-paragraph-bounds (begin end)
@@ -1093,6 +1195,12 @@ stacktrace it would have gotten unwrapped."
     (let ((data (claude-collab-resolve-annotation-by-id id)))
       (format "Resolved annotation %s: %s" id (claude-collab-core-prin1 data)))))
 
+(defun claude-collab--mcp-check-anchor (args)
+  "MCP handler: read-only drift check for annotation ID."
+  (let ((id (alist-get 'id args)))
+    (unless id (error "Missing required arg: id"))
+    (claude-collab-core-prin1 (claude-collab-check-anchor id))))
+
 (defun claude-collab--mcp-arg (args key)
   "Look up KEY in ARGS, accepting both symbol and string keys."
   (or (alist-get key args)
@@ -1104,10 +1212,12 @@ Required keys in ARGS: :id, :action. Optional: :new-text, :unit."
   (let ((id (claude-collab--mcp-arg args 'id))
         (action (claude-collab--mcp-arg args 'action))
         (new-text (claude-collab--mcp-arg args 'new-text))
-        (unit (claude-collab--mcp-arg args 'unit)))
+        (unit (claude-collab--mcp-arg args 'unit))
+        (force (claude-collab--mcp-arg args 'force)))
     (unless id (error "Missing required arg: id"))
     (unless action (error "Missing required arg: action"))
-    (claude-collab-core-prin1 (claude-collab-apply-annotation id action new-text unit))))
+    (claude-collab-core-prin1
+     (claude-collab-apply-annotation id action new-text unit force))))
 
 (defun claude-collab--mcp-get-region-bounds (args)
   "MCP handler: return bounds of UNIT around annotation ID."
@@ -1175,9 +1285,21 @@ optional :new-text and :unit)."
       :function #'claude-collab--mcp-resolve-annotation))
     (mcp-server-register-tool
      (make-mcp-server-tool
+      :name "claude-collab-check-anchor"
+      :title "Check Annotation Anchor"
+      :description "Read-only. Report whether an annotation's stored anchor still locates uniquely in the live buffer. Returns :drift nil for clean, :not-found if the original highlighted text no longer appears, :ambiguous (with candidate regions) if it appears in multiple places. Call this before apply-annotation when buffer state is uncertain — it's the cheapest way to detect that the buffer has shifted under stored byte positions."
+      :input-schema '((type . "object")
+                      (properties . ((id . ((type . "string")
+                                             (description . "Annotation ID.")))))
+                      (required . ("id")))
+      :annotations '((readOnlyHint . t)
+                     (idempotentHint . t))
+      :function #'claude-collab--mcp-check-anchor))
+    (mcp-server-register-tool
+     (make-mcp-server-tool
       :name "claude-collab-apply-annotation"
       :title "Apply Annotation Edit"
-      :description "Edit the region of an annotation, then auto-resolve. Optional unit snaps the region to a structural unit before replace/delete — without it, the edit operates on the raw highlighted text. unit must be omitted (or annotation) for insert-before/insert-after; insertion always uses the raw overlay edge. For replace, when the snapped end sits on a newline boundary the implementation auto-appends a trailing newline if missing, which prevents the most common org-structure damage."
+      :description "Edit the region of an annotation, then auto-resolve. Drift is a precondition: if the marginalia-stored anchor text no longer locates uniquely in the live buffer, the call returns (:error :code :drift) without mutating — call claude-collab-check-anchor first, or pass force=true to bypass the guard. Optional unit snaps the region to a structural unit before replace/delete — without it, the edit operates on the raw highlighted text. unit must be omitted (or annotation) for insert-before/insert-after; insertion always uses the raw overlay edge. For replace, when the snapped end sits on a newline boundary the implementation auto-appends a trailing newline if missing, which prevents the most common org-structure damage."
       :input-schema '((type . "object")
                       (properties . ((id . ((type . "string")
                                              (description . "Annotation ID returned by claude-collab-list-annotations.")))
@@ -1188,7 +1310,9 @@ optional :new-text and :unit)."
                                                    (description . "Replacement or insertion text. Required for replace/insert-*; ignored for delete.")))
                                      (unit . ((type . "string")
                                                (enum . ("annotation" "line" "paragraph" "section" "list-item"))
-                                               (description . "Structural unit to snap the region to before replace/delete. Default annotation = use the highlighted region as-is. section/list-item require org-mode; paragraph errors in org-mode (use section or list-item there).")))))
+                                               (description . "Structural unit to snap the region to before replace/delete. Default annotation = use the highlighted region as-is. section/list-item require org-mode; paragraph errors in org-mode (use section or list-item there).")))
+                                     (force . ((type . "boolean")
+                                               (description . "Bypass the drift precondition. Use only when the agent has reasoned about the drift and accepts the risk — drift detection exists because applying an edit on a drifted overlay is exactly how the original :verify:-line splice incident happened.")))))
                       (required . ("id" "action")))
       :annotations '((destructiveHint . t))
       :function #'claude-collab--mcp-apply-annotation))
