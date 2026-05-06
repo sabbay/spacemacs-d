@@ -609,6 +609,19 @@ gone from source). DIAGNOSIS carries the candidate regions (for
        (cons buf ov)))
    (claude-collab--file-buffers)))
 
+(defun claude-collab--create-highlight (file beg end label &optional anchor-props)
+  "Create an `org-remark' highlight at BEG..END in FILE with LABEL.
+Single chokepoint so the interactive (`claude-collab-add-annotation')
+and replay (`--unresolve-annotation') paths share one code path:
+property-drawer encoding, the call to `org-remark-highlight-mark',
+buffer-of-file resolution. ANCHOR-PROPS is a property list of symbol
+keys to encoded values (see `--encode-prop-value') and lands in the
+marginalia entry's drawer."
+  (when (fboundp 'org-remark-highlight-mark)
+    (with-current-buffer (find-file-noselect file)
+      (save-excursion
+        (org-remark-highlight-mark beg end nil nil label nil anchor-props)))))
+
 (defun claude-collab-resolve-annotation-by-id (id)
   "Remove annotation ID and log a session-scoped record for undo-coupling.
 Idempotent: if no overlay is found for ID, the annotation is already
@@ -618,7 +631,12 @@ matters because `apply-annotation' calls us as the auto-resolve step
 `after-save-hook' frequently disposes of overlays that have collapsed
 or been displaced by the edit. Treating that as failure would trigger
 the transactional rollback in `apply-annotation' for what is in fact
-a successful end state."
+a successful end state.
+
+The marginalia context (`:context-before' / `:context-after') is
+captured into the resolve record before deletion so
+`--unresolve-annotation' can replay the highlight with full anchor
+metadata on undo, not just the label."
   (claude-collab--with-mcp-log "resolve-annotation" (list :id id)
     (let ((found (claude-collab--find-annotation id)))
       (cond
@@ -631,9 +649,18 @@ a successful end state."
                (end (overlay-end ov))
                (label (overlay-get ov 'org-remark-label))
                (file (buffer-file-name buf))
+               (notes-buf (and (fboundp 'org-remark-notes-get-file-name)
+                               (let ((nf (with-current-buffer buf
+                                           (org-remark-notes-get-file-name))))
+                                 (and nf (file-exists-p nf)
+                                      (find-file-noselect nf)))))
+               (ctx (and notes-buf
+                         (claude-collab--marginalia-context notes-buf id)))
                (data (list :id id :file file :begin beg :end end :label label
                            :text (with-current-buffer buf
-                                   (buffer-substring-no-properties beg end)))))
+                                   (buffer-substring-no-properties beg end))
+                           :context-before (or (plist-get ctx :context-before) "")
+                           :context-after  (or (plist-get ctx :context-after)  ""))))
           (claude-collab--log-edit buf beg end "" 'annotation-resolve data)
           (with-current-buffer buf
             (save-excursion
@@ -646,17 +673,27 @@ a successful end state."
 (defun claude-collab--unresolve-annotation (edit)
   "Re-apply an annotation that was resolved as part of an undone session.
 EDIT must be a `claude-collab-edit-resolve' record — that's the only
-variant that carries the `annotation-data' slot."
+variant that carries the `annotation-data' slot. Reconstructs the
+anchor's marginalia context from the stored data so the replayed
+highlight has the same drift-resistance properties as the original;
+without this the unresolved highlight degrades to text-only matching
+on next `check-anchor' / `apply-annotation'."
   (let* ((data (claude-collab-edit-resolve-annotation-data edit))
          (file (plist-get data :file))
          (beg (plist-get data :begin))
          (end (plist-get data :end))
-         (label (plist-get data :label)))
+         (label (plist-get data :label))
+         (ctx-before (plist-get data :context-before))
+         (ctx-after (plist-get data :context-after))
+         (anchor-props
+          (and (or (and (stringp ctx-before) (not (string-empty-p ctx-before)))
+                   (and (stringp ctx-after)  (not (string-empty-p ctx-after))))
+               (list 'org-remark-context-before
+                     (claude-collab--encode-prop-value (or ctx-before ""))
+                     'org-remark-context-after
+                     (claude-collab--encode-prop-value (or ctx-after  ""))))))
     (when (and file (file-exists-p file))
-      (with-current-buffer (find-file-noselect file)
-        (save-excursion
-          (when (fboundp 'org-remark-highlight-mark)
-            (org-remark-highlight-mark beg end nil nil label)))))))
+      (claude-collab--create-highlight file beg end label anchor-props))))
 
 
 ;;; Structural editing primitives
@@ -2399,7 +2436,7 @@ matching."
                 (claude-collab--encode-prop-value ctx-before)
                 'org-remark-context-after
                 (claude-collab--encode-prop-value ctx-after))))
-    (org-remark-highlight-mark beg end nil nil note nil anchor-props))
+    (claude-collab--create-highlight (buffer-file-name) beg end note anchor-props))
   (deactivate-mark)
   (when-let* ((path (buffer-file-name))
               ((claude-collab--plan-file-p path)))

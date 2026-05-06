@@ -244,6 +244,65 @@ to fire the diff-snapshot advice; that whole path is gone."
       (claude-collab--revert-session 'test-session-7)
       (should (= 1 (length (claude-collab--annotations-in-buffer buf)))))))
 
+(ert-deftest claude-collab-test-unresolve-preserves-anchor-context ()
+  "Resolving an annotation captures its marginalia context into the
+session record; undoing the resolve replays the highlight WITH that
+context restored, so subsequent `check-anchor' / `apply-annotation'
+still benefit from context-disambiguation. Pre-T2.2 the unresolve
+path called `org-remark-highlight-mark' with no anchor-props and the
+recreated highlight degraded to text-only matching."
+  (skip-unless (fboundp 'org-remark-highlight-mark))
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-temp-file buf _file
+    (let (ann-id)
+      (with-current-buffer buf
+        (claude-collab-add-annotation 7 12 "context-roundtrip")
+        (save-buffer)
+        (setq ann-id (plist-get (car (claude-collab--annotations-in-buffer buf))
+                                :id)))
+      (let* ((before (car (claude-collab--annotations-in-buffer buf)))
+             (ctx-before (plist-get (plist-get before :anchor) :context-before))
+             (ctx-after  (plist-get (plist-get before :anchor) :context-after)))
+        (should (not (string-empty-p ctx-before)))
+        (should (not (string-empty-p ctx-after)))
+        (claude-collab-test--with-fake-session 'test-session-roundtrip
+          (claude-collab-resolve-annotation-by-id ann-id))
+        ;; Need to drop the marginalia buffer so the next read re-parses
+        ;; from disk — org-remark caches in-memory.
+        (let ((notes-file (with-current-buffer buf
+                            (org-remark-notes-get-file-name))))
+          (when-let ((nb (find-buffer-visiting notes-file)))
+            (with-current-buffer nb (set-buffer-modified-p nil))
+            (kill-buffer (find-buffer-visiting notes-file))))
+        (claude-collab--revert-session 'test-session-roundtrip)
+        (let* ((after (car (claude-collab--annotations-in-buffer buf)))
+               (ctx-before2 (plist-get (plist-get after :anchor) :context-before))
+               (ctx-after2  (plist-get (plist-get after :anchor) :context-after)))
+          (should (string= ctx-before ctx-before2))
+          (should (string= ctx-after ctx-after2)))))))
+
+(ert-deftest claude-collab-test-create-highlight-helper-applies-anchor-props ()
+  "`--create-highlight' is the chokepoint helper; when called with
+anchor-props, the resulting marginalia entry carries them. Direct
+test of the helper's API contract — both production callers
+(`add-annotation' interactive, `--unresolve-annotation' replay)
+funnel through this single function."
+  (skip-unless (fboundp 'org-remark-highlight-mark))
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-temp-file buf file
+    (claude-collab--create-highlight
+     file 7 12 "helper-test"
+     (list 'org-remark-context-before
+           (claude-collab--encode-prop-value "BEFORE-MARKER")
+           'org-remark-context-after
+           (claude-collab--encode-prop-value "AFTER-MARKER")))
+    (with-current-buffer buf (save-buffer))
+    (let* ((entry (car (claude-collab--annotations-in-buffer buf)))
+           (anchor (plist-get entry :anchor)))
+      (should (equal "helper-test" (plist-get entry :label)))
+      (should (string= "BEFORE-MARKER" (plist-get anchor :context-before)))
+      (should (string= "AFTER-MARKER"  (plist-get anchor :context-after))))))
+
 ;;; --- new structural editing tool tests ---
 
 (defmacro claude-collab-test--with-annotated-buffer (var-buf var-file var-id text &rest body)
