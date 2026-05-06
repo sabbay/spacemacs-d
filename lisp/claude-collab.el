@@ -875,20 +875,33 @@ RESULTS is the apply-annotation result with :id prepended for matching."
 
 ;;; MCP tool registrations
 
+(defun claude-collab--prin1 (sexp)
+  "Serialize SEXP as a `prin1' string with no length/depth caps.
+The default Spacemacs profile sets `print-length' and `print-level' to
+10, which truncates plists with more than 10 elements (each annotation
+plist has 12, so the trailing `:label' silently becomes `...'). MCP
+clients eat the printed sexp as text — truncation there is a real bug,
+not a debugger nicety."
+  (let ((print-length nil)
+        (print-level nil)
+        (print-circle nil)
+        (print-escape-newlines t))
+    (prin1-to-string sexp)))
+
 (defun claude-collab--mcp-list-annotations (args)
   "MCP handler: list pending annotations. ARGS may contain :file."
   (let* ((file (alist-get 'file args))
          (anns (if file
                    (claude-collab-pending-annotations (expand-file-name file))
                  (claude-collab--all-annotations))))
-    (format "%S" anns)))
+    (claude-collab--prin1 anns)))
 
 (defun claude-collab--mcp-resolve-annotation (args)
   "MCP handler: resolve annotation by ID. ARGS must contain :id."
   (let ((id (alist-get 'id args)))
     (unless id (error "Missing required arg: id"))
     (let ((data (claude-collab-resolve-annotation-by-id id)))
-      (format "Resolved annotation %s: %S" id data))))
+      (format "Resolved annotation %s: %s" id (claude-collab--prin1 data)))))
 
 (defun claude-collab--mcp-arg (args key)
   "Look up KEY in ARGS, accepting both symbol and string keys."
@@ -904,14 +917,14 @@ Required keys in ARGS: :id, :action. Optional: :new-text, :unit."
         (unit (claude-collab--mcp-arg args 'unit)))
     (unless id (error "Missing required arg: id"))
     (unless action (error "Missing required arg: action"))
-    (format "%S" (claude-collab-apply-annotation id action new-text unit))))
+    (claude-collab--prin1 (claude-collab-apply-annotation id action new-text unit))))
 
 (defun claude-collab--mcp-get-region-bounds (args)
   "MCP handler: return bounds of UNIT around annotation ID."
   (let ((id (claude-collab--mcp-arg args 'id))
         (unit (claude-collab--mcp-arg args 'unit)))
     (unless id (error "Missing required arg: id"))
-    (format "%S" (claude-collab-get-region-bounds id unit))))
+    (claude-collab--prin1 (claude-collab-get-region-bounds id unit))))
 
 (defun claude-collab--mcp-apply-edit (args)
   "MCP handler: apply a dumb buffer edit between BEGIN and END."
@@ -923,7 +936,7 @@ Required keys in ARGS: :id, :action. Optional: :new-text, :unit."
     (unless (integerp begin) (error "Missing or non-integer arg: begin"))
     (unless (integerp end) (error "Missing or non-integer arg: end"))
     (unless (stringp new-text) (error "Missing required arg: new-text"))
-    (format "%S" (claude-collab-apply-edit file begin end new-text))))
+    (claude-collab--prin1 (claude-collab-apply-edit file begin end new-text))))
 
 (defun claude-collab--mcp-get-active-plan (_args)
   "MCP handler: return active plan path (or empty string if none)."
@@ -935,7 +948,7 @@ Required key in ARGS: :edits (a list of objects with :id, :action,
 optional :new-text and :unit)."
   (let ((edits (claude-collab--mcp-arg args 'edits)))
     (unless edits (error "Missing required arg: edits"))
-    (format "%S" (claude-collab-apply-batch edits))))
+    (claude-collab--prin1 (claude-collab-apply-batch edits))))
 
 (defun claude-collab--mcp-run-tests (_args)
   "MCP handler: run the ERT suite; return pass/fail plist."
@@ -944,7 +957,7 @@ optional :new-text and :unit)."
       (load-file test-file)))
   (if (not (fboundp 'claude-collab-run-tests))
       "ERROR: claude-collab-test not loaded (file missing?)"
-    (format "%S" (claude-collab-run-tests))))
+    (claude-collab--prin1 (claude-collab-run-tests))))
 
 (with-eval-after-load 'mcp-server-tools
   (when (fboundp 'mcp-server-register-tool)
