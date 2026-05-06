@@ -286,6 +286,34 @@ tests run even when org-remark isn't loaded."
       (overlay-put ov 'org-remark-label "test-note")
       id)))
 
+(ert-deftest claude-collab-test-apply-annotation-resolve-error-surfaces ()
+  "When auto-resolve fails after a successful edit, the result carries
+the resolve-error message instead of silently reporting :resolved nil
+with no diagnostic."
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-temp-file buf _file
+    (let ((id (claude-collab-test--fabricate-overlay-in buf 7 12)))
+      ;; Force resolve to fail by stubbing it.
+      (cl-letf (((symbol-function 'claude-collab-resolve-annotation-by-id)
+                 (lambda (_id) (error "stubbed resolve failure"))))
+        (let ((result (claude-collab-apply-annotation id :replace "there")))
+          (should (plist-get result :ok))
+          (should (null (plist-get result :resolved)))
+          (should (equal "stubbed resolve failure"
+                         (plist-get result :resolve-error))))))))
+
+(ert-deftest claude-collab-test-mcp-log-records-error ()
+  "MCP handler errors land in the log buffer with an :error: line."
+  (claude-collab-clear-log)
+  (condition-case _err
+      (claude-collab--mcp-resolve-annotation '((id . "definitely-not-a-real-id")))
+    (error nil))
+  (with-current-buffer (claude-collab--mcp-log-buffer)
+    (let ((s (buffer-string)))
+      (should (string-match-p "resolve-annotation" s))
+      (should (string-match-p "ERROR" s))
+      (should (string-match-p "definitely-not-a-real-id" s)))))
+
 (ert-deftest claude-collab-test-apply-annotation-replace ()
   "apply-annotation :replace swaps the annotated region and auto-resolves."
   (claude-collab-test--reset-state)

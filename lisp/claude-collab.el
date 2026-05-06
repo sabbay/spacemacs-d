@@ -679,14 +679,18 @@ a plist (:error MSG) on failure."
                            new-end region-beg))
                     (_
                      (error "Unknown action: %S" action))))
-                (let ((resolved
-                       (condition-case _err
-                           (progn (claude-collab-resolve-annotation-by-id id) t)
-                         (error nil))))
-                  (list :ok t
-                        :new-begin new-begin
-                        :new-end new-end
-                        :resolved resolved)))
+                (let* ((resolve-error nil)
+                       (resolved
+                        (condition-case err
+                            (progn (claude-collab-resolve-annotation-by-id id) t)
+                          (error (setq resolve-error (error-message-string err))
+                                 nil))))
+                  (append
+                   (list :ok t
+                         :new-begin new-begin
+                         :new-end new-end
+                         :resolved resolved)
+                   (and resolve-error (list :resolve-error resolve-error)))))
             (error (list :error (error-message-string err)))))))))))
 
 (defun claude-collab--trim-paragraph-bounds (begin end)
@@ -873,6 +877,120 @@ RESULTS is the apply-annotation result with :id prepended for matching."
             :results (nreverse results))))))
 
 
+;;; MCP telemetry
+;;
+;; Every MCP handler timestamp + args + result/error gets appended to
+;; `*claude-collab-log*'. The point isn't general logging — it's that the
+;; agent calls these tools blind and silently-swallowed errors (auto-resolve
+;; failure, print-length truncation, etc.) turn into "this used to work,
+;; why broken" symptoms with no postmortem trail. The log is a postmortem.
+
+(defcustom claude-collab-mcp-log t
+  "When non-nil, MCP tool invocations are appended to `*claude-collab-log*'."
+  :type 'boolean
+  :group 'claude-collab)
+
+(defcustom claude-collab-mcp-log-max-entries 1000
+  "Cap on entries kept in `*claude-collab-log*'.
+When the cap is exceeded the oldest 25% of entries are pruned in one
+pass — bounded growth without per-entry quadratic cost."
+  :type 'integer
+  :group 'claude-collab)
+
+(defvar claude-collab--mcp-log-buffer-name "*claude-collab-log*")
+(defvar claude-collab--mcp-log-entries 0)
+
+(defun claude-collab--mcp-log-buffer ()
+  "Return the log buffer, creating it on first use."
+  (or (get-buffer claude-collab--mcp-log-buffer-name)
+      (let ((buf (get-buffer-create claude-collab--mcp-log-buffer-name)))
+        (with-current-buffer buf
+          (setq buffer-read-only t)
+          (setq-local truncate-lines nil))
+        buf)))
+
+(defun claude-collab--mcp-log-prune ()
+  "Drop the oldest ~25% of entries when over the cap."
+  (when (> claude-collab--mcp-log-entries
+           claude-collab-mcp-log-max-entries)
+    (let ((drop (max 1 (/ claude-collab-mcp-log-max-entries 4))))
+      (with-current-buffer (claude-collab--mcp-log-buffer)
+        (let ((inhibit-read-only t))
+          (save-excursion
+            (goto-char (point-min))
+            ;; Skip DROP entry-headers, then trim everything before that point.
+            (when (re-search-forward "^\\[" nil t (1+ drop))
+              (beginning-of-line)
+              (delete-region (point-min) (point))))))
+      (setq claude-collab--mcp-log-entries
+            (- claude-collab--mcp-log-entries drop)))))
+
+(defun claude-collab--mcp-log-entry (tool args result elapsed-ms err)
+  "Append a single MCP call record to the log buffer."
+  (when claude-collab-mcp-log
+    (let ((ts (format-time-string "%Y-%m-%d %H:%M:%S.%3N")))
+      (with-current-buffer (claude-collab--mcp-log-buffer)
+        (let ((inhibit-read-only t))
+          (goto-char (point-max))
+          (insert (format "[%s] %s (%dms)%s\n"
+                          ts tool elapsed-ms
+                          (if err "  ERROR" "")))
+          (insert (format "  args:   %s\n"
+                          (claude-collab--prin1 args)))
+          (when err
+            (insert (format "  error:  %s\n" err)))
+          (when result
+            ;; result is already a string (each handler returns the
+            ;; printed sexp); avoid double-prin1.
+            (insert (format "  result: %s\n"
+                            (if (stringp result)
+                                result
+                              (claude-collab--prin1 result)))))
+          (insert "\n")))
+      (cl-incf claude-collab--mcp-log-entries))
+    (claude-collab--mcp-log-prune)))
+
+(defmacro claude-collab--with-mcp-log (tool args &rest body)
+  "Time + log BODY's execution as a TOOL call with ARGS.
+On error, log the error message and re-signal — the MCP server gets the
+stacktrace it would have gotten unwrapped."
+  (declare (indent 2) (debug (stringp form body)))
+  (let ((t0 (make-symbol "t0"))
+        (r (make-symbol "r"))
+        (err (make-symbol "err"))
+        (caught (make-symbol "caught")))
+    `(let ((,t0 (current-time))
+           ,r ,err)
+       (condition-case ,caught
+           (setq ,r (progn ,@body))
+         (error (setq ,err (error-message-string ,caught))
+                (claude-collab--mcp-log-entry
+                 ,tool ,args nil
+                 (round (* 1000 (float-time (time-since ,t0))))
+                 ,err)
+                (signal (car ,caught) (cdr ,caught))))
+       (claude-collab--mcp-log-entry
+        ,tool ,args ,r
+        (round (* 1000 (float-time (time-since ,t0))))
+        nil)
+       ,r)))
+
+(defun claude-collab-show-log ()
+  "Pop to the MCP call log buffer; cursor on the most recent entry."
+  (interactive)
+  (pop-to-buffer (claude-collab--mcp-log-buffer))
+  (goto-char (point-max)))
+
+(defun claude-collab-clear-log ()
+  "Erase the MCP call log buffer and reset the entry counter."
+  (interactive)
+  (with-current-buffer (claude-collab--mcp-log-buffer)
+    (let ((inhibit-read-only t))
+      (erase-buffer)))
+  (setq claude-collab--mcp-log-entries 0)
+  (message "claude-collab log cleared"))
+
+
 ;;; MCP tool registrations
 
 (defun claude-collab--prin1 (sexp)
@@ -890,18 +1008,20 @@ not a debugger nicety."
 
 (defun claude-collab--mcp-list-annotations (args)
   "MCP handler: list pending annotations. ARGS may contain :file."
-  (let* ((file (alist-get 'file args))
-         (anns (if file
-                   (claude-collab-pending-annotations (expand-file-name file))
-                 (claude-collab--all-annotations))))
-    (claude-collab--prin1 anns)))
+  (claude-collab--with-mcp-log "list-annotations" args
+    (let* ((file (alist-get 'file args))
+           (anns (if file
+                     (claude-collab-pending-annotations (expand-file-name file))
+                   (claude-collab--all-annotations))))
+      (claude-collab--prin1 anns))))
 
 (defun claude-collab--mcp-resolve-annotation (args)
   "MCP handler: resolve annotation by ID. ARGS must contain :id."
-  (let ((id (alist-get 'id args)))
-    (unless id (error "Missing required arg: id"))
-    (let ((data (claude-collab-resolve-annotation-by-id id)))
-      (format "Resolved annotation %s: %s" id (claude-collab--prin1 data)))))
+  (claude-collab--with-mcp-log "resolve-annotation" args
+    (let ((id (alist-get 'id args)))
+      (unless id (error "Missing required arg: id"))
+      (let ((data (claude-collab-resolve-annotation-by-id id)))
+        (format "Resolved annotation %s: %s" id (claude-collab--prin1 data))))))
 
 (defun claude-collab--mcp-arg (args key)
   "Look up KEY in ARGS, accepting both symbol and string keys."
@@ -911,53 +1031,59 @@ not a debugger nicety."
 (defun claude-collab--mcp-apply-annotation (args)
   "MCP handler: apply ACTION to annotation ID.
 Required keys in ARGS: :id, :action. Optional: :new-text, :unit."
-  (let ((id (claude-collab--mcp-arg args 'id))
-        (action (claude-collab--mcp-arg args 'action))
-        (new-text (claude-collab--mcp-arg args 'new-text))
-        (unit (claude-collab--mcp-arg args 'unit)))
-    (unless id (error "Missing required arg: id"))
-    (unless action (error "Missing required arg: action"))
-    (claude-collab--prin1 (claude-collab-apply-annotation id action new-text unit))))
+  (claude-collab--with-mcp-log "apply-annotation" args
+    (let ((id (claude-collab--mcp-arg args 'id))
+          (action (claude-collab--mcp-arg args 'action))
+          (new-text (claude-collab--mcp-arg args 'new-text))
+          (unit (claude-collab--mcp-arg args 'unit)))
+      (unless id (error "Missing required arg: id"))
+      (unless action (error "Missing required arg: action"))
+      (claude-collab--prin1 (claude-collab-apply-annotation id action new-text unit)))))
 
 (defun claude-collab--mcp-get-region-bounds (args)
   "MCP handler: return bounds of UNIT around annotation ID."
-  (let ((id (claude-collab--mcp-arg args 'id))
-        (unit (claude-collab--mcp-arg args 'unit)))
-    (unless id (error "Missing required arg: id"))
-    (claude-collab--prin1 (claude-collab-get-region-bounds id unit))))
+  (claude-collab--with-mcp-log "get-region-bounds" args
+    (let ((id (claude-collab--mcp-arg args 'id))
+          (unit (claude-collab--mcp-arg args 'unit)))
+      (unless id (error "Missing required arg: id"))
+      (claude-collab--prin1 (claude-collab-get-region-bounds id unit)))))
 
 (defun claude-collab--mcp-apply-edit (args)
   "MCP handler: apply a dumb buffer edit between BEGIN and END."
-  (let ((file (claude-collab--mcp-arg args 'file))
-        (begin (claude-collab--mcp-arg args 'begin))
-        (end (claude-collab--mcp-arg args 'end))
-        (new-text (claude-collab--mcp-arg args 'new-text)))
-    (unless file (error "Missing required arg: file"))
-    (unless (integerp begin) (error "Missing or non-integer arg: begin"))
-    (unless (integerp end) (error "Missing or non-integer arg: end"))
-    (unless (stringp new-text) (error "Missing required arg: new-text"))
-    (claude-collab--prin1 (claude-collab-apply-edit file begin end new-text))))
+  (claude-collab--with-mcp-log "apply-edit" args
+    (let ((file (claude-collab--mcp-arg args 'file))
+          (begin (claude-collab--mcp-arg args 'begin))
+          (end (claude-collab--mcp-arg args 'end))
+          (new-text (claude-collab--mcp-arg args 'new-text)))
+      (unless file (error "Missing required arg: file"))
+      (unless (integerp begin) (error "Missing or non-integer arg: begin"))
+      (unless (integerp end) (error "Missing or non-integer arg: end"))
+      (unless (stringp new-text) (error "Missing required arg: new-text"))
+      (claude-collab--prin1 (claude-collab-apply-edit file begin end new-text)))))
 
-(defun claude-collab--mcp-get-active-plan (_args)
+(defun claude-collab--mcp-get-active-plan (args)
   "MCP handler: return active plan path (or empty string if none)."
-  (or (claude-collab-get-active-plan) ""))
+  (claude-collab--with-mcp-log "get-active-plan" args
+    (or (claude-collab-get-active-plan) "")))
 
 (defun claude-collab--mcp-apply-batch (args)
   "MCP handler: apply a list of annotation edits in one call.
 Required key in ARGS: :edits (a list of objects with :id, :action,
 optional :new-text and :unit)."
-  (let ((edits (claude-collab--mcp-arg args 'edits)))
-    (unless edits (error "Missing required arg: edits"))
-    (claude-collab--prin1 (claude-collab-apply-batch edits))))
+  (claude-collab--with-mcp-log "apply-batch" args
+    (let ((edits (claude-collab--mcp-arg args 'edits)))
+      (unless edits (error "Missing required arg: edits"))
+      (claude-collab--prin1 (claude-collab-apply-batch edits)))))
 
-(defun claude-collab--mcp-run-tests (_args)
+(defun claude-collab--mcp-run-tests (args)
   "MCP handler: run the ERT suite; return pass/fail plist."
-  (let ((test-file (expand-file-name "~/.spacemacs.d/lisp/claude-collab-test.el")))
-    (when (file-exists-p test-file)
-      (load-file test-file)))
-  (if (not (fboundp 'claude-collab-run-tests))
-      "ERROR: claude-collab-test not loaded (file missing?)"
-    (claude-collab--prin1 (claude-collab-run-tests))))
+  (claude-collab--with-mcp-log "run-tests" args
+    (let ((test-file (expand-file-name "~/.spacemacs.d/lisp/claude-collab-test.el")))
+      (when (file-exists-p test-file)
+        (load-file test-file)))
+    (if (not (fboundp 'claude-collab-run-tests))
+        "ERROR: claude-collab-test not loaded (file missing?)"
+      (claude-collab--prin1 (claude-collab-run-tests)))))
 
 (with-eval-after-load 'mcp-server-tools
   (when (fboundp 'mcp-server-register-tool)
@@ -2282,7 +2408,9 @@ buffer. Refreshes are debounced via a 0.2s idle timer."
    ["Display"
     ("h" "toggle overlays"  claude-collab-toggle-overlays)
     ("d" "diff popup mode"  claude-collab-diff-popup-mode)
-    ("D" "show full diff"   claude-collab-show-edit-diff-full)]])
+    ("D" "show full diff"   claude-collab-show-edit-diff-full)
+    ("t" "show MCP log"     claude-collab-show-log)
+    ("T" "clear MCP log"    claude-collab-clear-log)]])
 
 
 ;;; Spacemacs leader keys (SPC o c prefix)
@@ -2319,6 +2447,8 @@ buffer. Refreshes are debounced via a 0.2s idle timer."
     "och" #'claude-collab-toggle-overlays
     "ocd" #'claude-collab-diff-popup-mode
     "ocD" #'claude-collab-show-edit-diff-full
+    "oct" #'claude-collab-show-log
+    "ocT" #'claude-collab-clear-log
     "ocm" #'claude-collab-menu
     "ocH" #'claude-collab-hud-mode))
 
