@@ -677,12 +677,20 @@ variant that carries the `annotation-data' slot. Reconstructs the
 anchor's marginalia context from the stored data so the replayed
 highlight has the same drift-resistance properties as the original;
 without this the unresolved highlight degrades to text-only matching
-on next `check-anchor' / `apply-annotation'."
+on next `check-anchor' / `apply-annotation'.
+
+Signals `claude-collab-conflict' when the buffer region BEG..END no
+longer matches the text recorded at resolve time — same shape as the
+text-edit revert path, so `--revert-session' aborts cleanly via its
+existing handler instead of stomping over user-modified text. The
+class of bug we fixed everywhere else; the unresolve path was the
+last place that still re-marked at stored byte positions blindly."
   (let* ((data (claude-collab-edit-resolve-annotation-data edit))
          (file (plist-get data :file))
          (beg (plist-get data :begin))
          (end (plist-get data :end))
          (label (plist-get data :label))
+         (recorded-text (plist-get data :text))
          (ctx-before (plist-get data :context-before))
          (ctx-after (plist-get data :context-after))
          (anchor-props
@@ -693,6 +701,14 @@ on next `check-anchor' / `apply-annotation'."
                      'org-remark-context-after
                      (claude-collab--encode-prop-value (or ctx-after  ""))))))
     (when (and file (file-exists-p file))
+      (with-current-buffer (find-file-noselect file)
+        (when (and (stringp recorded-text)
+                   (<= end (point-max)))
+          (let ((current (buffer-substring-no-properties beg end)))
+            (unless (string= current recorded-text)
+              (signal 'claude-collab-conflict
+                      (list (format "unresolve drift at %s:%d — region changed since resolve"
+                                    (file-name-nondirectory file) beg)))))))
       (claude-collab--create-highlight file beg end label anchor-props))))
 
 

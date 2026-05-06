@@ -281,6 +281,54 @@ recreated highlight degraded to text-only matching."
           (should (string= ctx-before ctx-before2))
           (should (string= ctx-after ctx-after2)))))))
 
+(ert-deftest claude-collab-test-unresolve-aborts-on-drift ()
+  "When the user manually edits the resolved region between resolve
+and undo, `--unresolve-annotation' must signal `claude-collab-conflict'
+rather than re-mark over modified text. Mirror of the text-edit
+revert's drift-aware contract; pre-T2.3 the unresolve path stomped
+blindly at the recorded byte positions."
+  (skip-unless (fboundp 'org-remark-highlight-mark))
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-temp-file buf _file
+    (let (ann-id)
+      (with-current-buffer buf
+        (let ((ov (org-remark-highlight-mark 7 12 nil nil "drift-test")))
+          (setq ann-id (overlay-get ov 'org-remark-id)))
+        (save-buffer))
+      (claude-collab-test--with-fake-session 'test-session-drift
+        (claude-collab-resolve-annotation-by-id ann-id))
+      ;; User clobbers the previously-resolved region's text.
+      (with-current-buffer buf
+        (goto-char 7)
+        (delete-region 7 12)
+        (insert "MANUAL")
+        (save-buffer))
+      (let ((result (claude-collab--revert-session 'test-session-drift)))
+        (should (plist-get result :conflict))
+        (should (zerop (plist-get result :reverted))))
+      ;; Buffer must NOT have been re-marked / overwritten.
+      (should (string-match-p "MANUAL" (with-current-buffer buf (buffer-string)))))))
+
+(ert-deftest claude-collab-test-unresolve-clean-when-region-unchanged ()
+  "The drift check is silent when the recorded text still matches —
+unresolve completes, the highlight is recreated. Guards against the
+overcorrection of `T2.3 makes every undo paranoid' (which would defeat
+the existing `annotation-coupling' contract)."
+  (skip-unless (fboundp 'org-remark-highlight-mark))
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-temp-file buf _file
+    (let (ann-id)
+      (with-current-buffer buf
+        (let ((ov (org-remark-highlight-mark 7 12 nil nil "clean-test")))
+          (setq ann-id (overlay-get ov 'org-remark-id)))
+        (save-buffer))
+      (claude-collab-test--with-fake-session 'test-session-clean
+        (claude-collab-resolve-annotation-by-id ann-id))
+      (let ((result (claude-collab--revert-session 'test-session-clean)))
+        (should-not (plist-get result :conflict))
+        (should (= 1 (plist-get result :reverted))))
+      (should (= 1 (length (claude-collab--annotations-in-buffer buf)))))))
+
 (ert-deftest claude-collab-test-create-highlight-helper-applies-anchor-props ()
   "`--create-highlight' is the chokepoint helper; when called with
 anchor-props, the resulting marginalia entry carries them. Direct
