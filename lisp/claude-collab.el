@@ -312,8 +312,15 @@ doesn't fragment into dozens of character-level overlays."
     (when (overlayp ov) (delete-overlay ov))))
 
 (defun claude-collab--revert-session (session-id)
-  "Revert every edit in SESSION-ID, LIFO. Abort on conflict."
-  (let ((edits (gethash session-id claude-collab--sessions))
+  "Revert every edit in SESSION-ID, LIFO. Abort on conflict.
+Binds `claude-collab--inside-safe-eval' and `claude-collab--mcp-log-suppress'
+to t so the revert's own delete/insert calls don't (a) get logged into the
+same session as fresh edits — the recursive feedback loop that bloated the
+session during the /design revise drift incident — or (b) flood the MCP
+telemetry log with whole-buffer snapshots from the eval-elisp wrapper."
+  (let ((claude-collab--inside-safe-eval t)
+        (claude-collab--mcp-log-suppress t)
+        (edits (gethash session-id claude-collab--sessions))
         (reverted 0)
         (conflict nil))
     (cl-block revert
@@ -500,25 +507,26 @@ label round-trips across save/reload — overlay props don't."
 
 (defun claude-collab-resolve-annotation-by-id (id)
   "Remove annotation ID and log a session-scoped record for undo-coupling."
-  (let ((found (claude-collab--find-annotation id)))
-    (unless found (error "Annotation %s not found" id))
-    (let* ((buf (car found))
-           (ov (cdr found))
-           (beg (overlay-start ov))
-           (end (overlay-end ov))
-           (label (overlay-get ov 'org-remark-label))
-           (file (buffer-file-name buf))
-           (data (list :id id :file file :begin beg :end end :label label
-                       :text (with-current-buffer buf
-                               (buffer-substring-no-properties beg end)))))
-      (claude-collab--log-edit buf beg end "" 'annotation-resolve data)
-      (with-current-buffer buf
-        (save-excursion
-          (goto-char beg)
-          (if (fboundp 'org-remark-delete)
-              (ignore-errors (org-remark-delete beg))
-            (delete-overlay ov))))
-      data)))
+  (claude-collab--with-mcp-log "resolve-annotation" (list :id id)
+    (let ((found (claude-collab--find-annotation id)))
+      (unless found (error "Annotation %s not found" id))
+      (let* ((buf (car found))
+             (ov (cdr found))
+             (beg (overlay-start ov))
+             (end (overlay-end ov))
+             (label (overlay-get ov 'org-remark-label))
+             (file (buffer-file-name buf))
+             (data (list :id id :file file :begin beg :end end :label label
+                         :text (with-current-buffer buf
+                                 (buffer-substring-no-properties beg end)))))
+        (claude-collab--log-edit buf beg end "" 'annotation-resolve data)
+        (with-current-buffer buf
+          (save-excursion
+            (goto-char beg)
+            (if (fboundp 'org-remark-delete)
+                (ignore-errors (org-remark-delete beg))
+              (delete-overlay ov))))
+        data))))
 
 (defun claude-collab--unresolve-annotation (edit)
   "Re-apply an annotation that was resolved as part of an undone session."
@@ -622,76 +630,123 @@ NEW-TEXT gets a trailing newline auto-appended if missing — guards
 against the most common org-structure damage.
 
 Returns a plist (:ok t :new-begin N :new-end M :resolved t|nil) or
-a plist (:error MSG) on failure."
-  (let* ((action (claude-collab--normalize-action action))
-         (unit (claude-collab--normalize-unit unit))
-         (found (claude-collab--find-annotation id)))
-    (cond
-     ((not found)
-      (list :error (format "Annotation not found: %s" id)))
-     (t
-      (let* ((buf (car found))
-             (ov (cdr found))
-             (file (buffer-file-name buf)))
-        (cond
-         ((not (buffer-live-p buf))
-          (list :error (format "File not open in Emacs: %s" file)))
-         ((and (memq action '(:replace :insert-before :insert-after))
-               (not (stringp new-text)))
-          (list :error (format "Action %s requires :new-text" action)))
-         ((and (memq action '(:insert-before :insert-after))
-               (not (eq unit :annotation)))
-          (list :error
-                (format "Unit %s is not allowed for %s — insertion uses the raw overlay edge"
-                        unit action)))
-         (t
-          (condition-case err
-              (let (region-beg region-end new-begin new-end)
-                (with-current-buffer buf
-                  (let ((ov-beg (overlay-start ov))
-                        (ov-end (overlay-end ov)))
-                    (cond
-                     ((memq action '(:insert-before :insert-after))
-                      (setq region-beg ov-beg region-end ov-end))
-                     ((eq unit :annotation)
-                      (setq region-beg ov-beg region-end ov-end))
-                     (t
-                      (let ((b (claude-collab--bounds-for-unit ov unit)))
-                        (setq region-beg (car b) region-end (cdr b))))))
-                  (pcase action
-                    (:replace
-                     (let ((amended (claude-collab--ensure-trailing-newline
-                                     region-end new-text)))
-                       (claude-collab--edit-region buf region-beg region-end amended)
+a plist (:error MSG) on failure. The result also carries a `:pre-edit'
+plist with the bounds and a 200-char prefix of (i) what was at the
+overlay at edit-time and (ii) what marginalia recorded as
+`:org-remark-original-text:'. `:drift t' in `:pre-edit' means those two
+disagreed — the overlay no longer covers the text it was created on,
+and the edit just landed on whatever happens to be there. Surfacing
+this in the log is what lets us detect drift retrospectively without
+sanity-aborting yet."
+  (claude-collab--with-mcp-log "apply-annotation"
+                               (list :id id :action action
+                                     :new-text-prefix
+                                     (and (stringp new-text)
+                                          (substring new-text 0
+                                                     (min 80 (length new-text))))
+                                     :unit unit)
+    (let* ((action (claude-collab--normalize-action action))
+           (unit (claude-collab--normalize-unit unit))
+           (found (claude-collab--find-annotation id)))
+      (cond
+       ((not found)
+        (list :error (format "Annotation not found: %s" id)))
+       (t
+        (let* ((buf (car found))
+               (ov (cdr found))
+               (file (buffer-file-name buf)))
+          (cond
+           ((not (buffer-live-p buf))
+            (list :error (format "File not open in Emacs: %s" file)))
+           ((and (memq action '(:replace :insert-before :insert-after))
+                 (not (stringp new-text)))
+            (list :error (format "Action %s requires :new-text" action)))
+           ((and (memq action '(:insert-before :insert-after))
+                 (not (eq unit :annotation)))
+            (list :error
+                  (format "Unit %s is not allowed for %s — insertion uses the raw overlay edge"
+                          unit action)))
+           (t
+            (condition-case err
+                (let* (region-beg region-end new-begin new-end
+                       (pre-edit (claude-collab--pre-edit-fingerprint id ov buf)))
+                  (with-current-buffer buf
+                    (let ((ov-beg (overlay-start ov))
+                          (ov-end (overlay-end ov)))
+                      (cond
+                       ((memq action '(:insert-before :insert-after))
+                        (setq region-beg ov-beg region-end ov-end))
+                       ((eq unit :annotation)
+                        (setq region-beg ov-beg region-end ov-end))
+                       (t
+                        (let ((b (claude-collab--bounds-for-unit ov unit)))
+                          (setq region-beg (car b) region-end (cdr b))))))
+                    (pcase action
+                      (:replace
+                       (let ((amended (claude-collab--ensure-trailing-newline
+                                       region-end new-text)))
+                         (claude-collab--edit-region buf region-beg region-end amended)
+                         (setq new-begin region-beg
+                               new-end (+ region-beg (length amended)))))
+                      (:insert-before
+                       (claude-collab--edit-region buf region-beg region-beg new-text)
                        (setq new-begin region-beg
-                             new-end (+ region-beg (length amended)))))
-                    (:insert-before
-                     (claude-collab--edit-region buf region-beg region-beg new-text)
-                     (setq new-begin region-beg
-                           new-end (+ region-beg (length new-text))))
-                    (:insert-after
-                     (claude-collab--edit-region buf region-end region-end new-text)
-                     (setq new-begin region-end
-                           new-end (+ region-end (length new-text))))
-                    (:delete
-                     (claude-collab--edit-region buf region-beg region-end "")
-                     (setq new-begin region-beg
-                           new-end region-beg))
-                    (_
-                     (error "Unknown action: %S" action))))
-                (let* ((resolve-error nil)
-                       (resolved
-                        (condition-case err
-                            (progn (claude-collab-resolve-annotation-by-id id) t)
-                          (error (setq resolve-error (error-message-string err))
-                                 nil))))
-                  (append
-                   (list :ok t
-                         :new-begin new-begin
-                         :new-end new-end
-                         :resolved resolved)
-                   (and resolve-error (list :resolve-error resolve-error)))))
-            (error (list :error (error-message-string err)))))))))))
+                             new-end (+ region-beg (length new-text))))
+                      (:insert-after
+                       (claude-collab--edit-region buf region-end region-end new-text)
+                       (setq new-begin region-end
+                             new-end (+ region-end (length new-text))))
+                      (:delete
+                       (claude-collab--edit-region buf region-beg region-end "")
+                       (setq new-begin region-beg
+                             new-end region-beg))
+                      (_
+                       (error "Unknown action: %S" action))))
+                  (let* ((resolve-error nil)
+                         (resolved
+                          (condition-case err
+                              (progn (claude-collab-resolve-annotation-by-id id) t)
+                            (error (setq resolve-error (error-message-string err))
+                                   nil))))
+                    (append
+                     (list :ok t
+                           :new-begin new-begin
+                           :new-end new-end
+                           :resolved resolved)
+                     (and resolve-error (list :resolve-error resolve-error))
+                     (and pre-edit (list :pre-edit pre-edit)))))
+              (error (list :error (error-message-string err))))))))))))
+
+(defun claude-collab--pre-edit-fingerprint (id ov buf)
+  "Snapshot what the overlay covers right before the edit lands.
+Returns plist (:overlay-beg N :overlay-end M :existing-prefix S
+:marginalia-original-prefix S :drift t|nil), or nil on failure to read.
+Use the resulting `:drift' field to retrospectively detect that an
+overlay no longer covers the text it was anchored to."
+  (condition-case nil
+      (let* ((ov-beg (overlay-start ov))
+             (ov-end (overlay-end ov))
+             (cap 200)
+             (existing
+              (with-current-buffer buf
+                (buffer-substring-no-properties
+                 ov-beg (min ov-end (+ ov-beg cap)))))
+             (marg-text
+              (let* ((anns (claude-collab--annotations-in-buffer buf))
+                     (a (cl-find id anns
+                                 :key (lambda (a) (plist-get a :id))
+                                 :test #'string=)))
+                (and a (plist-get a :text))))
+             (marg-prefix (and marg-text
+                                (substring marg-text 0
+                                           (min cap (length marg-text))))))
+        (list :overlay-beg ov-beg
+              :overlay-end ov-end
+              :existing-prefix existing
+              :marginalia-original-prefix marg-prefix
+              :drift (and marg-prefix
+                          (not (string= existing marg-prefix)))))
+    (error nil)))
 
 (defun claude-collab--trim-paragraph-bounds (begin end)
   "Trim leading/trailing blank-line runs between BEGIN and END.
@@ -772,25 +827,26 @@ Notes on specific units:
   will consume the trailing newline between this section and the
   next, so callers should end their replacement text with a newline
   if they want the separator preserved."
-  (let* ((unit (claude-collab--normalize-unit unit))
-         (found (claude-collab--find-annotation id)))
-    (cond
-     ((not found)
-      (list :error (format "Annotation not found: %s" id)))
-     (t
-      (let* ((buf (car found))
-             (ov (cdr found))
-             (file (buffer-file-name buf)))
-        (cond
-         ((not (buffer-live-p buf))
-          (list :error (format "File not open in Emacs: %s" file)))
-         (t
-          (condition-case err
-              (with-current-buffer buf
-                (let ((bounds (claude-collab--bounds-for-unit ov unit)))
-                  (list :ok t :begin (car bounds) :end (cdr bounds))))
-            (user-error (list :error (error-message-string err)))
-            (error (list :error (error-message-string err)))))))))))
+  (claude-collab--with-mcp-log "get-region-bounds" (list :id id :unit unit)
+    (let* ((unit (claude-collab--normalize-unit unit))
+           (found (claude-collab--find-annotation id)))
+      (cond
+       ((not found)
+        (list :error (format "Annotation not found: %s" id)))
+       (t
+        (let* ((buf (car found))
+               (ov (cdr found))
+               (file (buffer-file-name buf)))
+          (cond
+           ((not (buffer-live-p buf))
+            (list :error (format "File not open in Emacs: %s" file)))
+           (t
+            (condition-case err
+                (with-current-buffer buf
+                  (let ((bounds (claude-collab--bounds-for-unit ov unit)))
+                    (list :ok t :begin (car bounds) :end (cdr bounds))))
+              (user-error (list :error (error-message-string err)))
+              (error (list :error (error-message-string err))))))))))))
 
 (defun claude-collab-apply-edit (file begin end new-text)
   "Replace FILE's BEGIN..END region with NEW-TEXT and save.
@@ -798,30 +854,36 @@ BEGIN == END means insert at that point. NEW-TEXT must be a string
 (may be empty — explicit deletion). Returns (:ok t :new-begin N
 :new-end M) or (:error MSG) if the file is not open, BEGIN/END are
 not integers, the range is inverted, or the range is out of bounds."
-  (cond
-   ((not (stringp new-text))
-    (list :error "new-text must be a string"))
-   ((not (and (integerp begin) (integerp end)))
-    (list :error "Invalid position: begin and end must be integers"))
-   (t
-    (let ((buf (find-buffer-visiting file)))
-      (cond
-       ((not (buffer-live-p buf))
-        (list :error (format "File not open in Emacs: %s" file)))
-       ((> begin end)
-        (list :error (format "Invalid range: begin (%d) > end (%d)" begin end)))
-       (t
-        (with-current-buffer buf
-          (let ((pmin (point-min)) (pmax (point-max)))
-            (cond
-             ((or (< begin pmin) (> end pmax))
-              (list :error (format "Range %d..%d out of bounds (%d..%d)"
-                                   begin end pmin pmax)))
-             (t
-              (claude-collab--edit-region buf begin end new-text)
-              (list :ok t
-                    :new-begin begin
-                    :new-end (+ begin (length new-text)))))))))))))
+  (claude-collab--with-mcp-log "apply-edit"
+                               (list :file file :begin begin :end end
+                                     :new-text-prefix
+                                     (and (stringp new-text)
+                                          (substring new-text 0
+                                                     (min 80 (length new-text)))))
+    (cond
+     ((not (stringp new-text))
+      (list :error "new-text must be a string"))
+     ((not (and (integerp begin) (integerp end)))
+      (list :error "Invalid position: begin and end must be integers"))
+     (t
+      (let ((buf (find-buffer-visiting file)))
+        (cond
+         ((not (buffer-live-p buf))
+          (list :error (format "File not open in Emacs: %s" file)))
+         ((> begin end)
+          (list :error (format "Invalid range: begin (%d) > end (%d)" begin end)))
+         (t
+          (with-current-buffer buf
+            (let ((pmin (point-min)) (pmax (point-max)))
+              (cond
+               ((or (< begin pmin) (> end pmax))
+                (list :error (format "Range %d..%d out of bounds (%d..%d)"
+                                     begin end pmin pmax)))
+               (t
+                (claude-collab--edit-region buf begin end new-text)
+                (list :ok t
+                      :new-begin begin
+                      :new-end (+ begin (length new-text))))))))))))))
 
 (defun claude-collab--batch-edit-arg (edit key)
   "Look up KEY in EDIT, accepting plist, alist with symbol keys, or alist
@@ -846,44 +908,54 @@ and losing partial results.
 
 Returns (:ok BOOL :applied N :failed M :results LIST), where each entry of
 RESULTS is the apply-annotation result with :id prepended for matching."
-  (cond
-   ((not (listp edits))
-    (list :error "edits must be a list"))
-   (t
-    (let ((results nil)
-          (applied 0)
-          (failed 0))
-      (dolist (edit edits)
-        (let* ((id (claude-collab--batch-edit-arg edit :id))
-               (raw
-                (condition-case err
-                    (let ((action (claude-collab--batch-edit-arg edit :action))
-                          (new-text (claude-collab--batch-edit-arg edit :new-text))
-                          (unit (claude-collab--batch-edit-arg edit :unit)))
-                      (cond
-                       ((null id) (list :error "Missing :id in edit"))
-                       ((null action) (list :error "Missing :action in edit"))
-                       (t (claude-collab-apply-annotation
-                           id action new-text unit))))
-                  (error (list :error (error-message-string err)))))
-               (annotated (append (list :id id) raw)))
-          (if (plist-get raw :ok)
-              (cl-incf applied)
-            (cl-incf failed))
-          (push annotated results)))
-      (list :ok (zerop failed)
-            :applied applied
-            :failed failed
-            :results (nreverse results))))))
+  (claude-collab--with-mcp-log "apply-batch"
+                               (list :edit-count (and (listp edits) (length edits))
+                                     :ids (and (listp edits)
+                                               (mapcar (lambda (e)
+                                                         (claude-collab--batch-edit-arg e :id))
+                                                       edits)))
+    (cond
+     ((not (listp edits))
+      (list :error "edits must be a list"))
+     (t
+      (let ((results nil)
+            (applied 0)
+            (failed 0))
+        (dolist (edit edits)
+          (let* ((id (claude-collab--batch-edit-arg edit :id))
+                 (raw
+                  (condition-case err
+                      (let ((action (claude-collab--batch-edit-arg edit :action))
+                            (new-text (claude-collab--batch-edit-arg edit :new-text))
+                            (unit (claude-collab--batch-edit-arg edit :unit)))
+                        (cond
+                         ((null id) (list :error "Missing :id in edit"))
+                         ((null action) (list :error "Missing :action in edit"))
+                         (t (claude-collab-apply-annotation
+                             id action new-text unit))))
+                    (error (list :error (error-message-string err)))))
+                 (annotated (append (list :id id) raw)))
+            (if (plist-get raw :ok)
+                (cl-incf applied)
+              (cl-incf failed))
+            (push annotated results)))
+        (list :ok (zerop failed)
+              :applied applied
+              :failed failed
+              :results (nreverse results)))))))
 
 
 ;;; MCP telemetry
 ;;
-;; Every MCP handler timestamp + args + result/error gets appended to
-;; `*claude-collab-log*'. The point isn't general logging — it's that the
-;; agent calls these tools blind and silently-swallowed errors (auto-resolve
-;; failure, print-length truncation, etc.) turn into "this used to work,
-;; why broken" symptoms with no postmortem trail. The log is a postmortem.
+;; Two-channel log:
+;;   `*claude-collab-log*' buffer       — live tail in Emacs (`SPC o c t')
+;;   `claude-collab-mcp-log-file' JSONL — cross-session postmortem
+;;
+;; Every entry point that touches the buffer or the marginalia goes
+;; through `claude-collab--with-mcp-log'. Wrapping the public functions
+;; (not the MCP handlers) means internal calls via `eval-elisp' are
+;; logged too — which was exactly the postmortem hole during the /design
+;; revise drift incident.
 
 (defcustom claude-collab-mcp-log t
   "When non-nil, MCP tool invocations are appended to `*claude-collab-log*'."
@@ -897,8 +969,29 @@ pass — bounded growth without per-entry quadratic cost."
   :type 'integer
   :group 'claude-collab)
 
+(defcustom claude-collab-mcp-log-file
+  (expand-file-name "~/.spacemacs.d/.claude-collab.log.jsonl")
+  "Path to the JSONL append-log for MCP calls. nil disables file logging.
+Each line is a self-contained JSON object — `tail -f' it, or
+`jq -c '. | select(.tool == \"apply-annotation\")' < FILE'."
+  :type '(choice (const :tag "Disabled" nil) file)
+  :group 'claude-collab)
+
+(defcustom claude-collab-mcp-log-file-max-bytes (* 50 1024 1024)
+  "Rotate the JSONL log when it grows past this size.
+On rotation the file is renamed to `<file>.1' and any prior `.1' is
+overwritten — no compression, no date-keyed history. We keep one
+generation behind, that's enough for a same-week postmortem."
+  :type 'integer
+  :group 'claude-collab)
+
 (defvar claude-collab--mcp-log-buffer-name "*claude-collab-log*")
 (defvar claude-collab--mcp-log-entries 0)
+
+(defvar claude-collab--mcp-log-suppress nil
+  "When non-nil, `claude-collab--with-mcp-log' becomes a no-op.
+Bound while reverting a session so the revert's own delete/insert
+sweeps don't generate phantom log entries through any wrapped path.")
 
 (defun claude-collab--mcp-log-buffer ()
   "Return the log buffer, creating it on first use."
@@ -925,29 +1018,65 @@ pass — bounded growth without per-entry quadratic cost."
       (setq claude-collab--mcp-log-entries
             (- claude-collab--mcp-log-entries drop)))))
 
+(defun claude-collab--mcp-log-file-rotate-if-needed ()
+  "Rotate the JSONL log file when it crosses the size cap."
+  (when-let* ((path claude-collab-mcp-log-file)
+              ((file-exists-p path))
+              (sz (file-attribute-size (file-attributes path)))
+              ((> sz claude-collab-mcp-log-file-max-bytes)))
+    (let ((rotated (concat path ".1")))
+      (when (file-exists-p rotated) (delete-file rotated))
+      (rename-file path rotated))))
+
+(defun claude-collab--mcp-log-file-write (entry-alist)
+  "Append ENTRY-ALIST to the JSONL log file as one JSON line.
+Errors are silenced — file logging must never crash an MCP handler."
+  (when-let ((path claude-collab-mcp-log-file))
+    (condition-case nil
+        (progn
+          (claude-collab--mcp-log-file-rotate-if-needed)
+          (let ((coding-system-for-write 'utf-8)
+                (line (concat (json-encode entry-alist) "\n")))
+            (write-region line nil path 'append 'silent)))
+      (error nil))))
+
 (defun claude-collab--mcp-log-entry (tool args result elapsed-ms err)
-  "Append a single MCP call record to the log buffer."
-  (when claude-collab-mcp-log
-    (let ((ts (format-time-string "%Y-%m-%d %H:%M:%S.%3N")))
+  "Append a single MCP call record to the buffer + the JSONL file."
+  (when (and claude-collab-mcp-log
+             (not claude-collab--mcp-log-suppress))
+    (let* ((time (current-time))
+           (ts (format-time-string "%Y-%m-%d %H:%M:%S.%3N" time))
+           (sid (and (boundp 'claude-collab--active-session)
+                     claude-collab--active-session))
+           (args-str (claude-collab--prin1 args))
+           (result-str (cond
+                        ((null result) nil)
+                        ((stringp result) result)
+                        (t (claude-collab--prin1 result)))))
+      ;; Buffer (live tail).
       (with-current-buffer (claude-collab--mcp-log-buffer)
         (let ((inhibit-read-only t))
           (goto-char (point-max))
-          (insert (format "[%s] %s (%dms)%s\n"
+          (insert (format "[%s] %s (%dms)%s%s\n"
                           ts tool elapsed-ms
+                          (if sid (format " sid=%s" sid) "")
                           (if err "  ERROR" "")))
-          (insert (format "  args:   %s\n"
-                          (claude-collab--prin1 args)))
+          (insert (format "  args:   %s\n" args-str))
           (when err
             (insert (format "  error:  %s\n" err)))
-          (when result
-            ;; result is already a string (each handler returns the
-            ;; printed sexp); avoid double-prin1.
-            (insert (format "  result: %s\n"
-                            (if (stringp result)
-                                result
-                              (claude-collab--prin1 result)))))
+          (when result-str
+            (insert (format "  result: %s\n" result-str)))
           (insert "\n")))
-      (cl-incf claude-collab--mcp-log-entries))
+      (cl-incf claude-collab--mcp-log-entries)
+      ;; JSONL (cross-session).
+      (claude-collab--mcp-log-file-write
+       `((ts . ,ts)
+         (tool . ,tool)
+         (session_id . ,(when sid (format "%s" sid)))
+         (elapsed_ms . ,elapsed-ms)
+         (args . ,args-str)
+         (result . ,result-str)
+         (err . ,err))))
     (claude-collab--mcp-log-prune)))
 
 (defmacro claude-collab--with-mcp-log (tool args &rest body)
@@ -1008,20 +1137,18 @@ not a debugger nicety."
 
 (defun claude-collab--mcp-list-annotations (args)
   "MCP handler: list pending annotations. ARGS may contain :file."
-  (claude-collab--with-mcp-log "list-annotations" args
-    (let* ((file (alist-get 'file args))
-           (anns (if file
-                     (claude-collab-pending-annotations (expand-file-name file))
-                   (claude-collab--all-annotations))))
-      (claude-collab--prin1 anns))))
+  (let* ((file (alist-get 'file args))
+         (anns (if file
+                   (claude-collab-pending-annotations (expand-file-name file))
+                 (claude-collab--all-annotations))))
+    (claude-collab--prin1 anns)))
 
 (defun claude-collab--mcp-resolve-annotation (args)
   "MCP handler: resolve annotation by ID. ARGS must contain :id."
-  (claude-collab--with-mcp-log "resolve-annotation" args
-    (let ((id (alist-get 'id args)))
-      (unless id (error "Missing required arg: id"))
-      (let ((data (claude-collab-resolve-annotation-by-id id)))
-        (format "Resolved annotation %s: %s" id (claude-collab--prin1 data))))))
+  (let ((id (alist-get 'id args)))
+    (unless id (error "Missing required arg: id"))
+    (let ((data (claude-collab-resolve-annotation-by-id id)))
+      (format "Resolved annotation %s: %s" id (claude-collab--prin1 data)))))
 
 (defun claude-collab--mcp-arg (args key)
   "Look up KEY in ARGS, accepting both symbol and string keys."
@@ -1031,59 +1158,53 @@ not a debugger nicety."
 (defun claude-collab--mcp-apply-annotation (args)
   "MCP handler: apply ACTION to annotation ID.
 Required keys in ARGS: :id, :action. Optional: :new-text, :unit."
-  (claude-collab--with-mcp-log "apply-annotation" args
-    (let ((id (claude-collab--mcp-arg args 'id))
-          (action (claude-collab--mcp-arg args 'action))
-          (new-text (claude-collab--mcp-arg args 'new-text))
-          (unit (claude-collab--mcp-arg args 'unit)))
-      (unless id (error "Missing required arg: id"))
-      (unless action (error "Missing required arg: action"))
-      (claude-collab--prin1 (claude-collab-apply-annotation id action new-text unit)))))
+  (let ((id (claude-collab--mcp-arg args 'id))
+        (action (claude-collab--mcp-arg args 'action))
+        (new-text (claude-collab--mcp-arg args 'new-text))
+        (unit (claude-collab--mcp-arg args 'unit)))
+    (unless id (error "Missing required arg: id"))
+    (unless action (error "Missing required arg: action"))
+    (claude-collab--prin1 (claude-collab-apply-annotation id action new-text unit))))
 
 (defun claude-collab--mcp-get-region-bounds (args)
   "MCP handler: return bounds of UNIT around annotation ID."
-  (claude-collab--with-mcp-log "get-region-bounds" args
-    (let ((id (claude-collab--mcp-arg args 'id))
-          (unit (claude-collab--mcp-arg args 'unit)))
-      (unless id (error "Missing required arg: id"))
-      (claude-collab--prin1 (claude-collab-get-region-bounds id unit)))))
+  (let ((id (claude-collab--mcp-arg args 'id))
+        (unit (claude-collab--mcp-arg args 'unit)))
+    (unless id (error "Missing required arg: id"))
+    (claude-collab--prin1 (claude-collab-get-region-bounds id unit))))
 
 (defun claude-collab--mcp-apply-edit (args)
   "MCP handler: apply a dumb buffer edit between BEGIN and END."
-  (claude-collab--with-mcp-log "apply-edit" args
-    (let ((file (claude-collab--mcp-arg args 'file))
-          (begin (claude-collab--mcp-arg args 'begin))
-          (end (claude-collab--mcp-arg args 'end))
-          (new-text (claude-collab--mcp-arg args 'new-text)))
-      (unless file (error "Missing required arg: file"))
-      (unless (integerp begin) (error "Missing or non-integer arg: begin"))
-      (unless (integerp end) (error "Missing or non-integer arg: end"))
-      (unless (stringp new-text) (error "Missing required arg: new-text"))
-      (claude-collab--prin1 (claude-collab-apply-edit file begin end new-text)))))
+  (let ((file (claude-collab--mcp-arg args 'file))
+        (begin (claude-collab--mcp-arg args 'begin))
+        (end (claude-collab--mcp-arg args 'end))
+        (new-text (claude-collab--mcp-arg args 'new-text)))
+    (unless file (error "Missing required arg: file"))
+    (unless (integerp begin) (error "Missing or non-integer arg: begin"))
+    (unless (integerp end) (error "Missing or non-integer arg: end"))
+    (unless (stringp new-text) (error "Missing required arg: new-text"))
+    (claude-collab--prin1 (claude-collab-apply-edit file begin end new-text))))
 
-(defun claude-collab--mcp-get-active-plan (args)
+(defun claude-collab--mcp-get-active-plan (_args)
   "MCP handler: return active plan path (or empty string if none)."
-  (claude-collab--with-mcp-log "get-active-plan" args
-    (or (claude-collab-get-active-plan) "")))
+  (or (claude-collab-get-active-plan) ""))
 
 (defun claude-collab--mcp-apply-batch (args)
   "MCP handler: apply a list of annotation edits in one call.
 Required key in ARGS: :edits (a list of objects with :id, :action,
 optional :new-text and :unit)."
-  (claude-collab--with-mcp-log "apply-batch" args
-    (let ((edits (claude-collab--mcp-arg args 'edits)))
-      (unless edits (error "Missing required arg: edits"))
-      (claude-collab--prin1 (claude-collab-apply-batch edits)))))
+  (let ((edits (claude-collab--mcp-arg args 'edits)))
+    (unless edits (error "Missing required arg: edits"))
+    (claude-collab--prin1 (claude-collab-apply-batch edits))))
 
-(defun claude-collab--mcp-run-tests (args)
+(defun claude-collab--mcp-run-tests (_args)
   "MCP handler: run the ERT suite; return pass/fail plist."
-  (claude-collab--with-mcp-log "run-tests" args
-    (let ((test-file (expand-file-name "~/.spacemacs.d/lisp/claude-collab-test.el")))
-      (when (file-exists-p test-file)
-        (load-file test-file)))
-    (if (not (fboundp 'claude-collab-run-tests))
-        "ERROR: claude-collab-test not loaded (file missing?)"
-      (claude-collab--prin1 (claude-collab-run-tests)))))
+  (let ((test-file (expand-file-name "~/.spacemacs.d/lisp/claude-collab-test.el")))
+    (when (file-exists-p test-file)
+      (load-file test-file)))
+  (if (not (fboundp 'claude-collab-run-tests))
+      "ERROR: claude-collab-test not loaded (file missing?)"
+    (claude-collab--prin1 (claude-collab-run-tests))))
 
 (with-eval-after-load 'mcp-server-tools
   (when (fboundp 'mcp-server-register-tool)
@@ -1204,6 +1325,34 @@ optional :new-text and :unit)."
 
 ;; Trigger mcp-server-tools load so the registrations fire at startup.
 (require 'mcp-server-tools nil t)
+
+
+;;; eval-elisp telemetry
+;;
+;; The upstream `mcp-server-emacs-tools--eval-elisp-handler' just
+;; `(format "%S" (safe-eval form))' — no logging, and it's the tool the
+;; agent reaches for when our typed handlers don't fit. During the
+;; /design revise drift incident every actual buffer mutation came in
+;; through this entry point and was invisible to our log. An :around
+;; advice pulls the expression and result into the same MCP-log channel
+;; as the typed handlers; we don't fork the upstream package.
+
+(defun claude-collab--advise-eval-elisp (orig args)
+  "Around-advice: log eval-elisp invocations through the MCP log."
+  (let* ((expression (alist-get 'expression args))
+         (cap 400)
+         (expr-prefix
+          (and (stringp expression)
+               (substring expression 0 (min cap (length expression))))))
+    (claude-collab--with-mcp-log "eval-elisp"
+                                 (list :expression-prefix expr-prefix
+                                       :expression-len (and (stringp expression)
+                                                            (length expression)))
+      (funcall orig args))))
+
+(with-eval-after-load 'mcp-server-emacs-tools-eval-elisp
+  (advice-add 'mcp-server-emacs-tools--eval-elisp-handler :around
+              #'claude-collab--advise-eval-elisp))
 
 
 ;;; Annotation popup at point

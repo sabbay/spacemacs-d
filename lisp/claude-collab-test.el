@@ -286,6 +286,73 @@ tests run even when org-remark isn't loaded."
       (overlay-put ov 'org-remark-label "test-note")
       id)))
 
+(ert-deftest claude-collab-test-apply-annotation-pre-edit-fingerprint ()
+  "apply-annotation result carries a :pre-edit plist so postmortem can
+spot drift retrospectively. With matching marginalia text, :drift is nil."
+  (skip-unless (fboundp 'org-remark-highlight-mark))
+  (claude-collab-test--with-temp-file buf _file
+    (with-current-buffer buf
+      (org-remark-highlight-mark 7 12 nil nil "test-note")
+      (save-buffer))
+    (let* ((id (plist-get (car (claude-collab--annotations-in-buffer buf)) :id))
+           (result (claude-collab-apply-annotation id :replace "there"))
+           (pe (plist-get result :pre-edit)))
+      (should (plist-get result :ok))
+      (should (plist-member result :pre-edit))
+      (should (numberp (plist-get pe :overlay-beg)))
+      (should (numberp (plist-get pe :overlay-end)))
+      (should (stringp (plist-get pe :existing-prefix)))
+      (should (null (plist-get pe :drift))))))
+
+(ert-deftest claude-collab-test-mcp-log-captures-internal-calls ()
+  "Logging on the public function (not the MCP handler) means a direct
+call to `claude-collab-apply-annotation' from elisp lands in the log —
+the exact path /design revise hit through eval-elisp."
+  (skip-unless (fboundp 'org-remark-highlight-mark))
+  (claude-collab-clear-log)
+  (claude-collab-test--with-temp-file buf _file
+    (with-current-buffer buf
+      (org-remark-highlight-mark 7 12 nil nil "test-note")
+      (save-buffer))
+    (let ((id (plist-get (car (claude-collab--annotations-in-buffer buf)) :id)))
+      (claude-collab-apply-annotation id :replace "there"))
+    (with-current-buffer (claude-collab--mcp-log-buffer)
+      (let ((s (buffer-string)))
+        (should (string-match-p "apply-annotation" s))
+        ;; pre-edit fingerprint surfaces in the result line
+        (should (string-match-p ":pre-edit" s))))))
+
+(ert-deftest claude-collab-test-mcp-log-jsonl-file-tee ()
+  "Each MCP log entry is also appended to `claude-collab-mcp-log-file'
+as one JSON object per line — `jq -c' over the file should parse."
+  (let* ((tmp (make-temp-file "cc-log-" nil ".jsonl"))
+         (claude-collab-mcp-log-file tmp))
+    (unwind-protect
+        (progn
+          (claude-collab-clear-log)
+          (claude-collab--mcp-log-entry "test-tool"
+                                        '(:foo "bar")
+                                        "(:ok t)"
+                                        7 nil)
+          (let ((content (with-temp-buffer
+                           (insert-file-contents tmp)
+                           (buffer-string))))
+            (should (string-match-p "\"tool\":\"test-tool\"" content))
+            (should (string-match-p "\"elapsed_ms\":7" content))
+            (should (string-suffix-p "\n" content))))
+      (delete-file tmp))))
+
+(ert-deftest claude-collab-test-mcp-log-suppress-flag ()
+  "When `claude-collab--mcp-log-suppress' is t, no entry lands. Used by
+revert-session to avoid recording its own delete/insert sweeps as fresh
+edits — the recursive feedback loop that bloated session 65390 during
+the /design revise drift incident."
+  (claude-collab-clear-log)
+  (let ((claude-collab--mcp-log-suppress t))
+    (claude-collab--mcp-log-entry "ghost-tool" '(:x 1) "result" 0 nil))
+  (with-current-buffer (claude-collab--mcp-log-buffer)
+    (should (string-empty-p (buffer-string)))))
+
 (ert-deftest claude-collab-test-apply-annotation-resolve-error-surfaces ()
   "When auto-resolve fails after a successful edit, the result carries
 the resolve-error message instead of silently reporting :resolved nil
