@@ -5,3 +5,15 @@
 :END:
 
 
+* DOM-level feedback w stylu Claude Desktop preview / Cursor
+:PROPERTIES:
+:org-remark-file: 2026-05-02-dom-feedback-w-stylu-claude-desktop-preview.org
+:END:
+
+**   - [ ] [[*Step 1 Spike: prove React Fiber =_debugSource= resolution against a real dev page][Step 1]]: target project for the Fiber spike — your current frontend, or a vanilla vite scaffold?
+
+**   - [ ] [[*Step 3 Bridge HTTP endpoint inside Emacs (=simple-httpd= or =web-server=)][Step 3]]: package shape — sibling =dom-collab.el=, or extend =claude-collab.el= in-place?
+
+**   - [ ] Bidirectional pin: when the user opens a DOM-originated annotation in Emacs, should we automatically scroll the live Playwright page to that element and re-highlight it? Cursor doesn't; stagewise does. Nice-to-have, but doubles the round-trip surface.
+
+**   Piggyback on three primitives already in the stack: Playwright MCP
