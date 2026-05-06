@@ -36,7 +36,7 @@
 ;; and the per-variant logic is local.
 (cl-defstruct claude-collab-edit
   session-id buffer buffer-name begin end
-  before-text after-text timestamp overlay)
+  before-text after-text timestamp overlay tx-id)
 
 (cl-defstruct (claude-collab-edit-text
                (:include claude-collab-edit)
@@ -68,14 +68,18 @@ from \"the ID is real but its source buffer isn't currently open\"
 (`:buffer-not-open'). Volatile — emacs restart wipes it; that's fine,
 the agent's recovery is the same in either case (open the file, retry).")
 
-(defvar claude-collab--inside-safe-eval nil
-  "Non-nil while running inside `mcp-server-security-safe-eval'.
-Signals to `claude-collab--edit-region' that the wrapper is doing
-its own diff-based whole-eval logging — per-edit logging would
-duplicate. Distinct from `claude-collab--active-session', which
-carries the session ID for attribution and is also live in
-non-eval contexts (e.g. when the apply-* MCP tools are invoked
-directly outside of `eval-elisp').")
+(defvar claude-collab--current-tx-id nil
+  "Identifier shared by all edits originating from one `eval-elisp' call.
+Let-bound by `claude-collab--advise-eval-elisp' to a unique string before
+the underlying handler runs; nested `apply-edit' / `apply-annotation'
+calls read it via `claude-collab--log-edit' and stamp the resulting
+struct so a downstream UI can collapse multiple records emitted by one
+agent invocation into a single grouped entry. Nil outside of
+`eval-elisp' — direct MCP tool calls don't need grouping, each is its
+own transaction by definition.")
+
+(defvar claude-collab--tx-counter 0
+  "Monotonic counter used to mint `claude-collab--current-tx-id' values.")
 
 (defvar claude-collab--active-plan-file nil
   "Absolute path of the most recently annotated plan file, or nil.
@@ -167,10 +171,9 @@ estate) does NOT demote the active plan."
 (defun claude-collab--log-edit (buf beg end before-text &optional kind annotation-data)
   "Create and store an edit record, installing an overlay. Return the record.
 KIND is `'text' (default) or `'annotation-resolve'; each maps to the
-appropriate `claude-collab-edit-*' variant constructor. The flat
-`kind'-symbol arg survives for back-compat with `--edit-region' and
-the eval-elisp record-advice; new callers should pass the proper
-keyword and the dispatch picks the variant."
+appropriate `claude-collab-edit-*' variant constructor. Stamps the
+ambient `claude-collab--current-tx-id' onto the record so multiple
+edits emitted within one `eval-elisp' invocation share an id."
   (with-current-buffer buf
     (let* ((session-id (claude-collab--current-session-id))
            (annotation-kind (eq kind 'annotation-resolve))
@@ -184,7 +187,8 @@ keyword and the dispatch picks the variant."
                          :before-text before-text
                          :after-text after-text
                          :timestamp (float-time)
-                         :overlay ov))
+                         :overlay ov
+                         :tx-id claude-collab--current-tx-id))
            (rec (if annotation-kind
                     (apply #'claude-collab-edit-resolve-create
                            (append shared
@@ -221,55 +225,6 @@ accumulate reachable state across long Emacs runs."
           (let ((ov (claude-collab-edit-overlay e)))
             (when (overlayp ov) (delete-overlay ov))))
         (remhash oldest-id claude-collab--sessions)))))
-
-(defun claude-collab--record-advice (orig-fn form)
-  "Around-advice for `mcp-server-security-safe-eval': log buffer edits.
-Produces ONE edit record per buffer touched, spanning the union of
-changes. Diff-based (snapshot before first change, diff after eval)
-instead of per-change recording, so a `replace-match' or similar
-doesn't fragment into dozens of character-level overlays."
-  (let* ((session-id (claude-collab--current-session-id))
-         (snapshots (make-hash-table :test 'eq))
-         (before-hook
-          (lambda (_beg _end)
-            (let ((buf (current-buffer)))
-              (when (and (claude-collab--buffer-trackable-p buf)
-                         (not (gethash buf snapshots)))
-                (puthash buf
-                         (buffer-substring-no-properties (point-min) (point-max))
-                         snapshots)))))
-         (result nil))
-    (let ((claude-collab--active-session session-id)
-          (claude-collab--inside-safe-eval t))
-      (unwind-protect
-          (progn
-            (add-hook 'before-change-functions before-hook)
-            (setq result (funcall orig-fn form)))
-        (remove-hook 'before-change-functions before-hook)))
-    (maphash
-     (lambda (buf before)
-       (when (buffer-live-p buf)
-         (with-current-buffer buf
-           (let ((after (buffer-substring-no-properties (point-min) (point-max))))
-             (unless (string= before after)
-               (let* ((pre (claude-collab-core--common-prefix-length before after))
-                      (suf (claude-collab-core--common-suffix-length
-                            (substring before pre)
-                            (substring after pre)))
-                      (before-diff (substring before pre
-                                              (max pre (- (length before) suf))))
-                      (after-diff (substring after pre
-                                             (max pre (- (length after) suf))))
-                      (beg (1+ pre))
-                      (end (+ beg (length after-diff))))
-                 (claude-collab--log-edit buf beg end before-diff 'text)))))))
-     snapshots)
-    result))
-
-(with-eval-after-load 'mcp-server-security
-  (advice-add 'mcp-server-security-safe-eval
-              :around #'claude-collab--record-advice))
-
 
 ;;; Inspection / session queries
 
@@ -348,13 +303,11 @@ it didn't mutate text — no buffer-state check is meaningful)."
 
 (defun claude-collab--revert-session (session-id)
   "Revert every edit in SESSION-ID, LIFO. Abort on conflict.
-Binds `claude-collab--inside-safe-eval' and `claude-collab--mcp-log-suppress'
-to t so the revert's own delete/insert calls don't (a) get logged into the
-same session as fresh edits — the recursive feedback loop that bloated the
-session during the /design revise drift incident — or (b) flood the MCP
-telemetry log with whole-buffer snapshots from the eval-elisp wrapper."
-  (let ((claude-collab--inside-safe-eval t)
-        (claude-collab--mcp-log-suppress t)
+Binds `claude-collab--mcp-log-suppress' to t so the revert's own
+delete/insert calls don't flood the telemetry log with their own
+fresh entries — the recursive feedback loop that bloated session
+65390 during the /design revise drift incident."
+  (let ((claude-collab--mcp-log-suppress t)
         (edits (gethash session-id claude-collab--sessions))
         (reverted 0)
         (conflict nil))
@@ -727,11 +680,11 @@ Shared low-level helper for `claude-collab-apply-annotation' and
 NEW-TEXT must be a string — callers are expected to have validated.
 
 Logs the edit via `claude-collab--log-edit' so it shows up in the
-session and can be reverted via `claude-collab-undo-session'. Skips
-the per-edit log when invoked from inside the `mcp-server-security-safe-eval'
-wrapper (detected via `claude-collab--inside-safe-eval') — that wrapper
-does its own diff-based logging across the whole eval, and per-edit
-logging here would duplicate."
+session and can be reverted via `claude-collab-undo-session'. The
+log fires unconditionally — previous versions suppressed logging
+inside `eval-elisp' to avoid duplication with a separate diff-snapshot
+path; that path was removed in favor of grouping multi-edit eval-elisp
+calls via `claude-collab--current-tx-id' instead."
   (with-current-buffer buffer
     (let ((before-text (buffer-substring-no-properties begin end))
           (new-end (+ begin (length new-text))))
@@ -741,8 +694,7 @@ logging here would duplicate."
           (delete-region begin end))
         (insert new-text))
       (save-buffer)
-      (unless claude-collab--inside-safe-eval
-        (claude-collab--log-edit buffer begin new-end before-text 'text)))))
+      (claude-collab--log-edit buffer begin new-end before-text 'text))))
 
 (defun claude-collab--ensure-trailing-newline (end new-text)
   "If buffer position END is preceded by a newline (region ends on a
@@ -1315,6 +1267,8 @@ Errors are silenced — file logging must never crash an MCP handler."
            (ts (format-time-string "%Y-%m-%d %H:%M:%S.%3N" time))
            (sid (and (boundp 'claude-collab--active-session)
                      claude-collab--active-session))
+           (tx (and (boundp 'claude-collab--current-tx-id)
+                    claude-collab--current-tx-id))
            (args-str (claude-collab-core-prin1 args))
            (result-str (cond
                         ((null result) nil)
@@ -1324,9 +1278,10 @@ Errors are silenced — file logging must never crash an MCP handler."
       (with-current-buffer (claude-collab--mcp-log-buffer)
         (let ((inhibit-read-only t))
           (goto-char (point-max))
-          (insert (format "[%s] %s (%dms)%s%s\n"
+          (insert (format "[%s] %s (%dms)%s%s%s\n"
                           ts tool elapsed-ms
                           (if sid (format " sid=%s" sid) "")
+                          (if tx (format " tx=%s" tx) "")
                           (if err "  ERROR" "")))
           (insert (format "  args:   %s\n" args-str))
           (when err
@@ -1340,6 +1295,7 @@ Errors are silenced — file logging must never crash an MCP handler."
        `((ts . ,ts)
          (tool . ,tool)
          (session_id . ,(when sid (format "%s" sid)))
+         (tx_id . ,tx)
          (elapsed_ms . ,elapsed-ms)
          (args . ,args-str)
          (result . ,result-str)
@@ -1628,17 +1584,24 @@ optional :new-text and :unit)."
 ;; as the typed handlers; we don't fork the upstream package.
 
 (defun claude-collab--advise-eval-elisp (orig args)
-  "Around-advice: log eval-elisp invocations through the MCP log."
+  "Around-advice: log eval-elisp invocations through the MCP log.
+Mints a fresh `claude-collab--current-tx-id' that propagates to every
+`apply-edit' / `apply-annotation' call nested inside this eval, so
+multi-edit transactions land in the JSONL log + session records with
+the same id and the UI can collapse them into one group."
   (let* ((expression (alist-get 'expression args))
          (cap 400)
          (expr-prefix
           (and (stringp expression)
                (substring expression 0 (min cap (length expression))))))
-    (claude-collab--with-mcp-log "eval-elisp"
-                                 (list :expression-prefix expr-prefix
-                                       :expression-len (and (stringp expression)
-                                                            (length expression)))
-      (funcall orig args))))
+    (let ((claude-collab--current-tx-id
+           (format "tx-%d" (cl-incf claude-collab--tx-counter))))
+      (claude-collab--with-mcp-log "eval-elisp"
+                                   (list :expression-prefix expr-prefix
+                                         :expression-len (and (stringp expression)
+                                                              (length expression))
+                                         :tx-id claude-collab--current-tx-id)
+        (funcall orig args)))))
 
 (with-eval-after-load 'mcp-server-emacs-tools-eval-elisp
   (advice-add 'mcp-server-emacs-tools--eval-elisp-handler :around

@@ -41,21 +41,14 @@
 
 (defun claude-collab-test--simulate-edit (buf pos text &optional replace-len)
   "Simulate a Claude edit: insert TEXT at POS in BUF (optionally replacing REPLACE-LEN chars).
-Routes through `mcp-server-security-safe-eval' so the advice fires.
-Skips the calling test if `mcp-server-security-safe-eval' is not loaded
-(eldev / batch CI without the local emacs-mcp-server checkout)."
-  (unless (fboundp 'mcp-server-security-safe-eval)
-    (ert-skip "mcp-server-security-safe-eval not loaded — integration test"))
-  (let ((form
-         (if replace-len
-             `(with-current-buffer ,(buffer-name buf)
-                (goto-char ,pos)
-                (delete-region ,pos ,(+ pos replace-len))
-                (insert ,text))
-           `(with-current-buffer ,(buffer-name buf)
-              (goto-char ,pos)
-              (insert ,text)))))
-    (mcp-server-security-safe-eval form)))
+Goes through `claude-collab-apply-edit' — the canonical MCP-tool path —
+so a session record + overlay land via the same code path production
+agents use. Pre-T2.1 this routed through `mcp-server-security-safe-eval'
+to fire the diff-snapshot advice; that whole path is gone."
+  (let* ((file (buffer-file-name buf))
+         (begin pos)
+         (end (if replace-len (+ pos replace-len) pos)))
+    (claude-collab-apply-edit file begin end text)))
 
 (defun claude-collab-test--reset-state ()
   "Reset all session logs and the known-id registry — isolates tests."
@@ -736,6 +729,60 @@ handler happens to raise."
       (should (string-match-p "ERROR" s))
       (should (string-match-p "kaboom" s)))))
 
+;;; --- T2.1: per-edit logging is canonical, tx-id groups eval-elisp ---
+
+(ert-deftest claude-collab-test-edit-region-always-logs ()
+  "After T2.1 the `--inside-safe-eval' suppression flag is gone — every
+`apply-edit' call lands as its own session record, no matter the
+ambient context. Two consecutive direct calls produce two records."
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-temp-file buf file
+    (let ((sid (claude-collab--current-session-id)))
+      (claude-collab-apply-edit file 1 1 "A-")
+      (claude-collab-apply-edit file 1 1 "B-")
+      (let ((records (claude-collab-session-edits sid)))
+        (should (= 2 (length records)))
+        (should (cl-every #'claude-collab-edit-text-p records))))))
+
+(ert-deftest claude-collab-test-eval-elisp-edits-share-tx-id ()
+  "Multiple edits emitted from a single `eval-elisp' invocation share
+one `tx-id' so a downstream UI / audit consumer can group them.
+Calls the around-advice directly with a fake `orig' so we don't need
+the upstream MCP package loaded."
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-temp-file buf file
+    (let ((sid (claude-collab--current-session-id)))
+      (claude-collab--advise-eval-elisp
+       (lambda (_args)
+         (claude-collab-apply-edit file 1 1 "X-")
+         (claude-collab-apply-edit file 1 1 "Y-")
+         "ok")
+       '((expression . "(progn (apply-edit ...) (apply-edit ...))")))
+      (let* ((records (claude-collab-session-edits sid))
+             (text-records (cl-remove-if-not #'claude-collab-edit-text-p
+                                             records))
+             (tx-ids (mapcar #'claude-collab-edit-tx-id text-records)))
+        (should (= 2 (length text-records)))
+        (should (cl-every #'identity tx-ids))
+        (should (apply #'string= tx-ids))))))
+
+(ert-deftest claude-collab-test-direct-mcp-edit-has-nil-tx-id ()
+  "Direct `apply-edit' calls (not nested under `eval-elisp') leave
+`tx-id' unset on the resulting record — there's nothing to group with,
+each call is its own implicit transaction. Distinguishes from the
+shared-tx-id case so the UI doesn't accidentally collapse unrelated
+calls into a phantom group."
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-temp-file buf file
+    (let ((sid (claude-collab--current-session-id))
+          (claude-collab--current-tx-id nil))
+      (claude-collab-apply-edit file 1 1 "Z-")
+      (let* ((records (claude-collab-session-edits sid))
+             (text-records (cl-remove-if-not #'claude-collab-edit-text-p
+                                             records)))
+        (should (= 1 (length text-records)))
+        (should (null (claude-collab-edit-tx-id (car text-records))))))))
+
 ;; `claude-collab-test-apply-annotation-replace' was a permanent
 ;; `:expected-result :failed' duplicate of
 ;; `apply-annotation-real-org-remark' (which passes). Removed —
@@ -1333,15 +1380,11 @@ Uses :section because its end always sits one past a newline."
 ;;; --- session logging + recovery ---
 
 (ert-deftest claude-collab-test-apply-annotation-logs-to-session ()
-  "apply-annotation logs the text edit into the current session so undo can revert it.
-Let-binds `claude-collab--inside-safe-eval' to nil to simulate the
-production MCP-tool path (the test runner itself runs inside safe-eval
-via eval-elisp, which would otherwise suppress per-edit logging)."
+  "apply-annotation logs the text edit into the current session so undo can revert it."
   (claude-collab-test--reset-state)
   (claude-collab-test--with-temp-file buf _file
     (let* ((id (claude-collab-test--fabricate-overlay-in buf 7 12))
-           (sid (claude-collab--current-session-id))
-           (claude-collab--inside-safe-eval nil))
+           (sid (claude-collab--current-session-id)))
       (claude-collab-apply-annotation id :replace "there")
       (let ((edits (claude-collab-session-edits sid)))
         (should (cl-some #'claude-collab-edit-text-p edits))
@@ -1357,8 +1400,7 @@ via eval-elisp, which would otherwise suppress per-edit logging)."
            (sid (claude-collab--current-session-id))
            (edits (list (list :id id1 :action :replace :new-text "Howdy")
                         (list :id id2 :action :replace :new-text "there")
-                        (list :id id3 :action :replace :new-text "that")))
-           (claude-collab--inside-safe-eval nil))
+                        (list :id id3 :action :replace :new-text "that"))))
       (claude-collab-apply-batch edits)
       (let* ((records (claude-collab-session-edits sid))
              (text-count (length (cl-remove-if-not
@@ -1375,8 +1417,7 @@ via eval-elisp, which would otherwise suppress per-edit logging)."
            (id2 (claude-collab-test--fabricate-overlay-in buf 7 12))
            (sid (claude-collab--current-session-id))
            (edits (list (list :id id1 :action :replace :new-text "Howdy")
-                        (list :id id2 :action :replace :new-text "there")))
-           (claude-collab--inside-safe-eval nil))
+                        (list :id id2 :action :replace :new-text "there"))))
       (claude-collab-apply-batch edits)
       (should-not (string= original (with-current-buffer buf (buffer-string))))
       (claude-collab--revert-session sid)
