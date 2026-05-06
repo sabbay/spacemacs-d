@@ -485,18 +485,51 @@ file). A whitespace-only body is treated as nil."
              (not (string-empty-p (string-trim body)))
              (string-trim body)))))
 
+(defun claude-collab--encode-prop-value (s)
+  "Encode S as a single-line org property value via `prin1-to-string'.
+Org's property-drawer syntax doesn't allow newlines or unescaped
+quote chars in values — `prin1-to-string' produces a quoted, escaped
+literal that round-trips through `read'. Required for context-before
+/ context-after which routinely contain the source's newlines."
+  (let ((print-escape-newlines t)
+        (print-escape-control-characters t))
+    (prin1-to-string s)))
+
+(defun claude-collab--decode-prop-value (s)
+  "Inverse of `claude-collab--encode-prop-value'.
+Reads back a `prin1'-encoded string. If S doesn't parse (legacy raw
+values from before encoding landed), returns S unchanged so old
+marginalia entries don't crash the read path."
+  (condition-case nil
+      (let ((parsed (read s)))
+        (if (stringp parsed) parsed s))
+    (error s)))
+
+(defun claude-collab--marginalia-context (notes-buf id)
+  "Read context-before/after from marginalia NOTES-BUF for annotation ID.
+Returns a plist (:context-before S :context-after S) — both strings,
+empty when the entry is from before context capture landed."
+  (with-current-buffer notes-buf
+    (org-with-wide-buffer
+     (when-let ((p (org-find-property "org-remark-id" id)))
+       (list :context-before
+             (claude-collab--decode-prop-value
+              (or (org-entry-get p "org-remark-context-before") "\"\""))
+             :context-after
+             (claude-collab--decode-prop-value
+              (or (org-entry-get p "org-remark-context-after") "\"\"")))))))
+
 (defun claude-collab--annotations-in-buffer (buf)
   "Return list of annotation plists in BUF.
 Reads via `org-remark-highlights-get' from the notes buffer so the
 label round-trips across save/reload — overlay props don't.
 
-Each plist carries an `:anchor' key — a plist-shaped serialization of
-a `claude-collab-core-anchor' suitable for round-tripping through MCP.
-Marginalia today only stores `:original-text', so the anchor's
-context fields default to empty; consumers calling
-`claude-collab-core-anchor-from-marginalia' on the `:anchor' value
-will get text-only matching, which still resolves uniquely for the
-common case of distinct CLARIFY blocks."
+Each plist carries an `:anchor' key whose `:context-before' /
+`:context-after' fields come from marginalia properties written at
+mark time by `claude-collab-add-annotation'. Pre-context-capture
+annotations have empty strings here — drift detection on those
+degrades to text-only matching (still useful, just `:ambiguous' on
+duplicated text instead of disambiguating by surroundings)."
   (when (buffer-live-p buf)
     (with-current-buffer buf
       (when (and (buffer-file-name)
@@ -509,16 +542,20 @@ common case of distinct CLARIFY blocks."
           (when notes-buf
             (mapcar (lambda (h)
                       (let* ((loc (plist-get h :location))
-                             (text (plist-get (plist-get h :props) :original-text)))
-                        (list :id (plist-get h :id)
+                             (id (plist-get h :id))
+                             (text (plist-get (plist-get h :props) :original-text))
+                             (ctx (claude-collab--marginalia-context notes-buf id)))
+                        (list :id id
                               :file (buffer-file-name)
                               :begin (car loc)
                               :end (cdr loc)
                               :text text
                               :label (claude-collab--annotation-note h)
                               :anchor (list :text (or text "")
-                                            :context-before ""
-                                            :context-after ""))))
+                                            :context-before
+                                            (or (plist-get ctx :context-before) "")
+                                            :context-after
+                                            (or (plist-get ctx :context-after) "")))))
                     (org-remark-highlights-get notes-buf))))))))
 
 (defun claude-collab-pending-annotations (file)
@@ -714,11 +751,25 @@ splice incident — the function aborts with
 untouched. Pass FORCE non-nil to bypass the guard (use sparingly:
 this is the unsafe path that produced the original drift).
 
-Returns a plist (:ok t :new-begin N :new-end M :resolved t|nil) or
-a plist (:error MSG ...) on failure. Successful results also carry a
-`:pre-edit' plist with overlay bounds and 200-char prefixes of both
-the live buffer and the marginalia-recorded original-text — preserved
-as breadcrumbs for postmortem grep over the JSONL log."
+Edit + auto-resolve form one unit-of-work. Two terminal shapes:
+
+  (:ok t :new-begin N :new-end M :resolved t :pre-edit PLIST)
+    edit landed AND annotation overlay was removed AND marginalia
+    entry was archived — the whole transaction succeeded.
+
+  (:error MSG :code KW [:drift-kind ...] [:resolve-error ...]
+   [:pre-edit PLIST])
+    something went wrong. If KW is `:drift', no buffer mutation
+    happened. If KW is `:resolve-failed', the edit was applied but
+    auto-resolve threw, so the function rolled the buffer back to
+    pre-edit state before returning (transactional). Other codes
+    (`:not-found', `:bad-arg', `:unit-not-allowed', `:buffer-not-open',
+    `:unknown') likewise didn't mutate the buffer.
+
+The `:resolved nil' shape from before transactional rollback is
+gone — a result with `:ok t' implies the annotation is fully
+resolved; a result with `:error' implies the buffer is in pre-edit
+state."
   (claude-collab--with-mcp-log "apply-annotation"
                                (list :id id :action action
                                      :new-text-prefix
@@ -1287,11 +1338,20 @@ stacktrace it would have gotten unwrapped."
     (claude-collab-core-prin1 anns)))
 
 (defun claude-collab--mcp-resolve-annotation (args)
-  "MCP handler: resolve annotation by ID. ARGS must contain :id."
+  "MCP handler: resolve annotation by ID. ARGS must contain :id.
+Translates the public function's two return shapes — `(:id ... :file
+... :text ...)' for a real resolve and `(:already-resolved t :id ID)'
+for an idempotent no-op — into distinct human-readable lines so an
+agent reading the wire result can tell which path ran."
   (let ((id (alist-get 'id args)))
     (unless id (error "Missing required arg: id"))
     (let ((data (claude-collab-resolve-annotation-by-id id)))
-      (format "Resolved annotation %s: %s" id (claude-collab-core-prin1 data)))))
+      (cond
+       ((plist-get data :already-resolved)
+        (format "Annotation %s was already resolved (no-op)" id))
+       (t
+        (format "Resolved annotation %s: %s"
+                id (claude-collab-core-prin1 data)))))))
 
 (defun claude-collab--mcp-check-anchor (args)
   "MCP handler: read-only drift check for annotation ID."
@@ -2267,10 +2327,27 @@ Set to nil to disable capping.  Applied via advice on
               #'claude-collab--cap-inline-image-height))
 
 
+(defcustom claude-collab-anchor-context-size 100
+  "Characters of context captured on each side at annotation creation.
+Persisted into marginalia as `:org-remark-context-before:' /
+`:org-remark-context-after:' org properties; read back by
+`--annotations-in-buffer' into the anchor plist that downstream code
+\(check-anchor, apply-annotation drift precondition) feeds to
+`claude-collab-core-detect-drift'. 100 matches `bookmark.el''s
+philosophy — large enough to disambiguate near-duplicate spans (the
+typical CLARIFY repetition pattern), small enough to keep marginalia
+entries readable."
+  :type 'integer
+  :group 'claude-collab)
+
 (defun claude-collab-add-annotation (beg end note)
   "Annotate the selected region with NOTE.
-Creates an `org-remark' highlight whose label is NOTE — the popup
-and the `SPC o c l' listing both read from this label."
+Creates an `org-remark' highlight whose label is NOTE — the popup and
+the `SPC o c l' listing both read from this label. Also captures the
+surrounding text (`claude-collab-anchor-context-size' chars on each
+side) into the marginalia entry so the content-addressed anchor can
+disambiguate near-duplicate spans without falling back to text-only
+matching."
   (interactive
    (progn
      (unless (use-region-p)
@@ -2282,7 +2359,19 @@ and the `SPC o c l' listing both read from this label."
     (user-error "org-remark not loaded"))
   (when (string-empty-p (string-trim note))
     (user-error "Empty annotation — aborted"))
-  (org-remark-highlight-mark beg end nil nil note)
+  (let* ((cap claude-collab-anchor-context-size)
+         (ctx-before (buffer-substring-no-properties
+                      (max (point-min) (- beg cap)) beg))
+         (ctx-after (buffer-substring-no-properties
+                     end (min (point-max) (+ end cap))))
+         ;; Encode for org property drawer (no newlines / quote
+         ;; literals). Decoded on read in `--marginalia-context'.
+         (anchor-props
+          (list 'org-remark-context-before
+                (claude-collab--encode-prop-value ctx-before)
+                'org-remark-context-after
+                (claude-collab--encode-prop-value ctx-after))))
+    (org-remark-highlight-mark beg end nil nil note nil anchor-props))
   (deactivate-mark)
   (when-let* ((path (buffer-file-name))
               ((claude-collab--plan-file-p path)))

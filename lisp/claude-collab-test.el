@@ -291,6 +291,56 @@ tests run even when org-remark isn't loaded."
       (overlay-put ov 'org-remark-label "test-note")
       id)))
 
+(ert-deftest claude-collab-test-add-annotation-captures-context ()
+  "`claude-collab-add-annotation' writes context-before / context-after
+into marginalia properties at mark time; `--annotations-in-buffer'
+reads them back into the anchor plist. Without this round-trip, the
+drift detector falls back to text-only matching and reports
+`:ambiguous' on every duplicated CLARIFY block — which is the
+recurring shape the design was meant to handle."
+  (skip-unless (and (fboundp 'org-remark-highlight-mark)
+                    (fboundp 'org-remark-save)))
+  (claude-collab-test--with-temp-file buf _file
+    (with-current-buffer buf
+      (erase-buffer)
+      (insert "alpha bravo charlie BRAVO delta")
+      (save-buffer)
+      (claude-collab-add-annotation 21 26 "annotate-second")
+      ;; In a real session `org-remark-mode' would be on and its
+      ;; `after-save-hook' would flush highlights to marginalia. In
+      ;; the batch fixture the mode isn't active, so call save
+      ;; explicitly to commit the new properties.
+      (org-remark-save))
+    (let* ((entry (car (claude-collab--annotations-in-buffer buf)))
+           (anchor (plist-get entry :anchor)))
+      (should (equal "BRAVO" (plist-get anchor :text)))
+      (should (string-suffix-p "charlie " (plist-get anchor :context-before)))
+      (should (string-prefix-p " delta" (plist-get anchor :context-after))))))
+
+(ert-deftest claude-collab-test-context-disambiguates-duplicate-text ()
+  "End-to-end proof that the context capture from `add-annotation' fixes
+the drift detector's text-only-match degraded mode. Two `BRAVO's in
+the buffer; we mark the second; the anchor's context lets the core
+locate uniquely instead of returning `:ambiguous'."
+  (skip-unless (and (fboundp 'org-remark-highlight-mark)
+                    (fboundp 'org-remark-save)))
+  (claude-collab-test--with-temp-file buf _file
+    (with-current-buffer buf
+      (erase-buffer)
+      (insert "alpha BRAVO charlie BRAVO delta")
+      (save-buffer)
+      (claude-collab-add-annotation 21 26 "second")
+      (org-remark-save))
+    (let* ((entry (car (claude-collab--annotations-in-buffer buf)))
+           (anchor (claude-collab-core-anchor-from-marginalia
+                    (plist-get entry :anchor)))
+           (source (with-current-buffer buf (buffer-string)))
+           (result (claude-collab-core-locate-anchor source anchor)))
+      ;; With context populated, the core finds a unique match at
+      ;; position 20 (0-indexed) — the SECOND `BRAVO'.
+      (should (eq :ok (car result)))
+      (should (= 20 (claude-collab-core-region-begin (cadr result)))))))
+
 (ert-deftest claude-collab-test-edit-adt-variants ()
   "`claude-collab-edit' is the abstract base; instances are one of two
 variants. The `-p' predicates are mutually exclusive on a given record,
