@@ -905,10 +905,12 @@ Navigate          Stage/Commit       Remote            Branches & Logs    Forge 
 ;; Allow buffer-editing primitives so Claude can edit live buffers without disk races.
 ;; Also whitelists file I/O needed by the claude-collab test harness (temp files,
 ;; find-file-noselect) and by org-remark annotation persistence (write-region).
+;; `find-file' is allowed so the /design skill can pop a freshly-written plan
+;; into a window; sensitive-file patterns still gate ~/.ssh, ~/.authinfo, etc.
 (setq mcp-server-security-allowed-dangerous-functions
       '(with-current-buffer save-buffer insert goto-char
         delete-region kill-buffer set-buffer set-visited-file-name
-        find-file-noselect write-region delete-file make-temp-file))
+        find-file find-file-noselect write-region delete-file make-temp-file))
 (condition-case err
     (mcp-server-start-unix)
   (error (message "mcp-server: not started (%s)" err)))
@@ -945,6 +947,14 @@ Navigate          Stage/Commit       Remote            Branches & Logs    Forge 
 (with-eval-after-load 'claude-code-ide
   (claude-code-ide-emacs-tools-setup))
 
+
+;; ----- agent-shell (xenodium): ACP-driven LLM agent shells -----
+;; Using OpenAI Codex via existing ChatGPT/Codex login (no API key needed).
+;; Requires the codex CLI globally: npm install -g @openai/codex
+;; Start with M-x agent-shell-openai-start-codex, or M-x agent-shell.
+(with-eval-after-load 'agent-shell
+  (setq agent-shell-openai-authentication
+        (agent-shell-openai-make-authentication :login t)))
 
 ;; Dev iteration: reload every .el under ~/.spacemacs.d/lisp/ (except tests)
 ;; so edits to claude-collab.el, monday-docs-sync.el, user-config.el, etc.

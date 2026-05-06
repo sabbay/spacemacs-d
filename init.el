@@ -89,6 +89,7 @@ This function should only modify configuration layer settings."
      plz
      org-modern
      gcmh
+     agent-shell
      (org-excalidraw :location (recipe :fetcher github :repo "wdavew/org-excalidraw")))
 
    ;; A list of packages that cannot be updated.
@@ -626,21 +627,21 @@ This function is called at the very end of Spacemacs initialization."
      '("2b0fcc7cc9be4c09ec5c75405260a85e41691abb1ee28d29fcd5521e4fca575b"
        "7fea145741b3ca719ae45e6533ad1f49b2a43bf199d9afaee5b6135fd9e6f9b8" default))
    '(package-selected-packages
-     '(ace-link add-node-modules-path aggressive-indent all-the-icons auto-compile
-                auto-highlight-symbol avy-jump-helm-line centered-cursor-mode
-                clean-aindent-mode column-enforce-mode company-web counsel
-                counsel-css define-word devdocs diminish dired-quick-sort
-                disable-mouse dotenv-mode drag-stuff dumb-jump elisp-def
-                elisp-demos elisp-slime-nav emmet-mode emr eval-sexp-fu evil-anzu
-                evil-args evil-cleverparens evil-collection evil-easymotion
-                evil-escape evil-evilified-state evil-exchange evil-goggles
-                evil-iedit-state evil-indent-plus evil-lion evil-lisp-state
-                evil-matchit evil-mc evil-nerd-commenter evil-numbers
-                evil-surround evil-textobj-line evil-tutor evil-unimpaired
-                evil-visual-mark-mode evil-visualstar exec-path-from-shell
-                expand-region eyebrowse fancy-battery gcmh golden-ratio
-                google-translate haml-mode helm-ag helm-comint helm-css-scss
-                helm-descbinds helm-make helm-mode-manager helm-org
+     '(ace-link acp add-node-modules-path agent-shell aggressive-indent all-the-icons
+                auto-compile auto-highlight-symbol avy-jump-helm-line
+                centered-cursor-mode clean-aindent-mode column-enforce-mode
+                company-web counsel counsel-css define-word devdocs diminish
+                dired-quick-sort disable-mouse dotenv-mode drag-stuff dumb-jump
+                elisp-def elisp-demos elisp-slime-nav emmet-mode emr eval-sexp-fu
+                evil-anzu evil-args evil-cleverparens evil-collection
+                evil-easymotion evil-escape evil-evilified-state evil-exchange
+                evil-goggles evil-iedit-state evil-indent-plus evil-lion
+                evil-lisp-state evil-matchit evil-mc evil-nerd-commenter
+                evil-numbers evil-surround evil-textobj-line evil-tutor
+                evil-unimpaired evil-visual-mark-mode evil-visualstar
+                exec-path-from-shell expand-region eyebrowse fancy-battery
+                golden-ratio google-translate haml-mode helm-ag helm-comint
+                helm-css-scss helm-descbinds helm-make helm-mode-manager helm-org
                 helm-projectile helm-purpose helm-swoop helm-xref hide-comnt
                 highlight-indentation highlight-numbers highlight-parentheses
                 hl-todo holy-mode htmlize hungry-delete hybrid-mode impatient-mode
@@ -648,8 +649,8 @@ This function is called at the very end of Spacemacs initialization."
                 multi-line nameless open-junk-file org org-modern org-remark
                 org-superstar overseer page-break-lines paradox password-generator
                 pcre2el plantuml-mode plz popwin pug-mode quickrun
-                rainbow-delimiters restart-emacs sass-mode scss-mode slim-mode
-                space-doc spaceline spacemacs-purpose-popwin
+                rainbow-delimiters restart-emacs sass-mode scss-mode shell-maker
+                slim-mode space-doc spaceline spacemacs-purpose-popwin
                 spacemacs-whitespace-cleanup string-edit-at-point
                 string-inflection swiper symbol-overlay symon tagedit term-cursor
                 toc-org transient treemacs-evil treemacs-icons-dired
