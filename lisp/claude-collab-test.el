@@ -58,14 +58,15 @@ Skips the calling test if `mcp-server-security-safe-eval' is not loaded
     (mcp-server-security-safe-eval form)))
 
 (defun claude-collab-test--reset-state ()
-  "Reset all session logs — isolates tests."
+  "Reset all session logs and the known-id registry — isolates tests."
   (maphash
    (lambda (_sid edits)
      (dolist (e edits)
        (let ((ov (claude-collab-edit-overlay e)))
          (when (overlayp ov) (delete-overlay ov)))))
    claude-collab--sessions)
-  (clrhash claude-collab--sessions))
+  (clrhash claude-collab--sessions)
+  (clrhash claude-collab--known-annotation-ids))
 
 ;;; --- tests ---
 
@@ -490,11 +491,81 @@ test only covered `:not-found'."
 ;;; --- check-anchor (read-only drift probe) ---
 
 (ert-deftest claude-collab-test-check-anchor-not-found-id ()
-  "check-anchor on a non-existent ID returns :exists nil."
+  "check-anchor on an ID we have never seen returns :exists nil
+:reason :unknown-id — distinct from :buffer-not-open below."
+  (claude-collab-test--reset-state)
   (let ((result (claude-collab-check-anchor "ghost-id-zzz")))
     (should (plist-get result :ok))
     (should-not (plist-get result :exists))
+    (should (eq :unknown-id (plist-get result :reason)))
     (should (plist-get result :error))))
+
+(ert-deftest claude-collab-test-check-anchor-buffer-closed ()
+  "An ID we've seen (id is in the registry) but whose buffer has been
+killed returns :reason :buffer-not-open — agent should reopen the file
+and retry, distinct from :unknown-id where reopening won't help."
+  (skip-unless (fboundp 'org-remark-highlight-mark))
+  (claude-collab-test--reset-state)
+  (let (saved-id)
+    (claude-collab-test--with-temp-file buf _file
+      (with-current-buffer buf
+        (org-remark-highlight-mark 7 12 nil nil "x")
+        (save-buffer))
+      (setq saved-id (plist-get (car (claude-collab--annotations-in-buffer buf))
+                                :id))
+      ;; Kill the buffer; registry retains the id.
+      (with-current-buffer buf (set-buffer-modified-p nil))
+      (kill-buffer buf))
+    (let ((result (claude-collab-check-anchor saved-id)))
+      (should (plist-get result :ok))
+      (should-not (plist-get result :exists))
+      (should (eq :buffer-not-open (plist-get result :reason))))))
+
+(ert-deftest claude-collab-test-check-anchor-overlay-collapsed ()
+  "When the overlay collapses to zero width (text underneath was deleted),
+:overlay-bounds reports (BEG . BEG) and :drift surfaces :not-found —
+the anchor's text is gone, the empty overlay isn't a valid region."
+  (skip-unless (fboundp 'org-remark-highlight-mark))
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-temp-file buf _file
+    (with-current-buffer buf
+      (org-remark-highlight-mark 7 12 nil nil "x")
+      (save-buffer)
+      (delete-region 7 12)) ; overlay collapses to (7 . 7)
+    (let* ((id (plist-get (car (claude-collab--annotations-in-buffer buf))
+                          :id))
+           (result (claude-collab-check-anchor id))
+           (bounds (plist-get result :overlay-bounds)))
+      (should (plist-get result :exists))
+      (should (consp bounds))
+      (should (= (car bounds) (cdr bounds)))
+      (should (eq :not-found (plist-get result :drift))))))
+
+(ert-deftest claude-collab-test-check-anchor-marginalia-anchor-missing ()
+  "Legacy / corrupt marginalia entry with empty :text in :anchor surfaces
+as :drift :anchor-missing rather than the misleading :not-found that
+empty-needle search would otherwise yield. Diagnosis carries the reason."
+  (skip-unless (fboundp 'org-remark-highlight-mark))
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-temp-file buf _file
+    (with-current-buffer buf
+      (org-remark-highlight-mark 7 12 nil nil "x")
+      (save-buffer))
+    (let ((id (plist-get (car (claude-collab--annotations-in-buffer buf))
+                         :id)))
+      (cl-letf (((symbol-function 'claude-collab--annotations-in-buffer)
+                 (lambda (b)
+                   (when (eq b buf)
+                     (list (list :id id :begin 7 :end 12
+                                 :text "" :label "x"
+                                 :anchor (list :text ""
+                                               :context-before ""
+                                               :context-after "")))))))
+        (let ((result (claude-collab-check-anchor id)))
+          (should (plist-get result :exists))
+          (should (eq :anchor-missing (plist-get result :drift)))
+          (should (eq :marginalia-incomplete
+                      (plist-get (plist-get result :diagnosis) :reason))))))))
 
 (ert-deftest claude-collab-test-check-anchor-clean ()
   "Anchor located uniquely → :drift nil."

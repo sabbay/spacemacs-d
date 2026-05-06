@@ -59,6 +59,15 @@ the overlay can be re-marked on undo."
 (defvar claude-collab--active-session nil
   "Session ID bound during an advised MCP eval; nil outside.")
 
+(defvar claude-collab--known-annotation-ids (make-hash-table :test 'equal)
+  "Hash table mapping annotation ID -> source file path.
+Populated whenever `claude-collab--annotations-in-buffer' reads marginalia
+for a buffer; used by `claude-collab-check-anchor' to distinguish
+\"agent passed a stale ID we haven't seen this session\" (`:unknown-id')
+from \"the ID is real but its source buffer isn't currently open\"
+(`:buffer-not-open'). Volatile — emacs restart wipes it; that's fine,
+the agent's recovery is the same in either case (open the file, retry).")
+
 (defvar claude-collab--inside-safe-eval nil
   "Non-nil while running inside `mcp-server-security-safe-eval'.
 Signals to `claude-collab--edit-region' that the wrapper is doing
@@ -545,6 +554,8 @@ duplicated text instead of disambiguating by surroundings)."
                              (id (plist-get h :id))
                              (text (plist-get (plist-get h :props) :original-text))
                              (ctx (claude-collab--marginalia-context notes-buf id)))
+                        (puthash id (buffer-file-name)
+                                 claude-collab--known-annotation-ids)
                         (list :id id
                               :file (buffer-file-name)
                               :begin (car loc)
@@ -575,28 +586,42 @@ Returns a plist:
   (:ok t :exists t :file F :drift KIND|nil :diagnosis PLIST :anchor PLIST
    :overlay-bounds (BEG . END))
 
-  (:ok t :exists nil :error MSG)   when ID isn't found in any tracked buffer
+  (:ok t :exists nil :reason REASON :error MSG)   when ID is unresolvable.
 
-KIND is `:not-found' / `:ambiguous' / nil(=clean). When KIND is non-nil,
-DIAGNOSIS carries the candidate regions (for `:ambiguous') so the agent
-can pick a winner before retrying. The companion of
-`claude-collab-apply-annotation' with FORCE=t — the agent calls this
-first, decides if drift is acceptable, then applies."
+REASON is `:buffer-not-open' (id is one we've seen this session, but its
+source buffer is currently killed — agent should reopen the file and
+retry) or `:unknown-id' (id never seen this session, likely stale or
+typo — opening anything won't help).
+
+DRIFT KIND is `:not-found' / `:ambiguous' / `:anchor-missing' / nil
+(=clean). `:anchor-missing' means the marginalia entry exists but its
+recorded text is empty — usually a legacy annotation written before
+context capture landed, distinct from `:not-found' (anchor present, text
+gone from source). DIAGNOSIS carries the candidate regions (for
+`:ambiguous') so the agent can pick a winner before retrying."
   (claude-collab--with-mcp-log "check-anchor" (list :id id)
     (let ((found (claude-collab--find-annotation id)))
       (cond
        ((not found)
-        (list :ok t :exists nil
-              :error (format "Annotation %s not found in any tracked buffer" id)))
+        (let ((known (gethash id claude-collab--known-annotation-ids)))
+          (list :ok t :exists nil
+                :reason (if known :buffer-not-open :unknown-id)
+                :error (if known
+                           (format "Annotation %s exists in %s but no buffer is currently open for it"
+                                   id known)
+                         (format "Annotation %s not found in any tracked buffer" id)))))
        (t
         (let* ((buf (car found))
                (ov (cdr found))
                (entry (cl-find id (claude-collab--annotations-in-buffer buf)
                                :key (lambda (a) (plist-get a :id))
                                :test #'string=))
-               (anchor (and entry
+               (anchor-plist (and entry (plist-get entry :anchor)))
+               (anchor-text (or (plist-get anchor-plist :text) ""))
+               (anchor-missing (string-empty-p anchor-text))
+               (anchor (and entry (not anchor-missing)
                             (claude-collab-core-anchor-from-marginalia
-                             (plist-get entry :anchor))))
+                             anchor-plist)))
                (source (with-current-buffer buf
                          (buffer-substring-no-properties (point-min) (point-max))))
                (drift-result (and anchor
@@ -604,15 +629,19 @@ first, decides if drift is acceptable, then applies."
           (list :ok t :exists t
                 :file (buffer-file-name buf)
                 :overlay-bounds (cons (overlay-start ov) (overlay-end ov))
-                :anchor (and entry (plist-get entry :anchor))
+                :anchor anchor-plist
                 :drift (cond
+                        (anchor-missing :anchor-missing)
                         ((eq drift-result :clean) nil)
                         ((and (consp drift-result)
                               (eq (car drift-result) :drifted))
                          (plist-get (cdr drift-result) :reason)))
-                :diagnosis (and (consp drift-result)
-                                (eq (car drift-result) :drifted)
-                                (plist-get (cdr drift-result) :diagnosis)))))))))
+                :diagnosis (cond
+                            (anchor-missing
+                             (list :reason :marginalia-incomplete))
+                            ((and (consp drift-result)
+                                  (eq (car drift-result) :drifted))
+                             (plist-get (cdr drift-result) :diagnosis))))))))))
 
 (defun claude-collab--find-annotation (id)
   "Return (buf . overlay) for annotation ID, or nil."
