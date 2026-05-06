@@ -1,0 +1,7 @@
+
+* Sync Emacs PATH with interactive shell
+:PROPERTIES:
+:org-remark-file: 2026-04-21-emacs-shell-path-sync.org
+:END:
+
+

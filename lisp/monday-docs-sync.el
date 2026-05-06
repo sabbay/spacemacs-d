@@ -33,6 +33,11 @@
 (declare-function spacemacs/declare-prefix "spacemacs")
 (declare-function org-babel-execute-src-block "ob-core")
 
+;; Forward declaration — actual `defvar' sits lower in the file near
+;; its first writer.  Needed here because `--run-pre-sync-command-async'
+;; reads the flag on failure paths.
+(defvar monday-docs-sync--in-flight)
+
 ;; ---- Customization --------------------------------------------------
 
 (defgroup monday-docs-sync nil
@@ -67,6 +72,38 @@ or the server responds with \"Request body must be a JSON with query\"."
   "⚠️ Auto-synced from org — do not edit. Edits here will be overwritten on next sync."
   "Notice block prepended to every synced Monday doc."
   :type 'string
+  :group 'monday-docs-sync)
+
+(defcustom monday-docs-sync-intro-notice
+  "Here are the artifacts, PDF and a source file. You can also read content there, but the PDF looks nicer imho."
+  "Additional blockquote rendered right below the readonly notice.
+When nil, the blockquote is skipped.  Typically used to point readers
+at the attachment blocks that follow (source .org, compiled .pdf)."
+  :type '(choice (const :tag "Skip" nil) string)
+  :group 'monday-docs-sync)
+
+(defcustom monday-docs-sync-attachments nil
+  "Default list of files (relative to the org file) to upload as
+attachments at the top of the synced doc.
+
+Each entry is a path string.  Per-buffer overrides are provided via
+`#+MONDAY_ATTACH:' keywords; if any of those are present, they win.
+Resolved against the buffer's `default-directory' at sync time."
+  :type '(repeat string)
+  :group 'monday-docs-sync)
+
+(defcustom monday-docs-sync-pre-sync-command nil
+  "Shell command run before each sync.
+
+The buffer's org file path is appended as a single argument.  When the
+command exits non-zero the sync aborts.  Intended for regenerating
+attachment artifacts (e.g. a compiled PDF) so the uploaded files are
+fresh.
+
+Example:
+  (setq monday-docs-sync-pre-sync-command
+        \"~/.spacemacs.d/bin/build-pdf.sh\")"
+  :type '(choice (const :tag "Skip" nil) string)
   :group 'monday-docs-sync)
 
 (defcustom monday-docs-sync-force-render t
@@ -136,6 +173,72 @@ board URL — in both cases we extract the leading run of digits."
       (let ((raw (match-string-no-properties 1)))
         (when (string-match "[0-9]+" raw)
           (match-string 0 raw))))))
+
+(defun monday-docs-sync--run-pre-sync-command-async (on-done)
+  "Run `monday-docs-sync-pre-sync-command' asynchronously.
+
+ON-DONE is called once, with no arguments, once the command exits
+successfully.  On failure (non-zero exit or spawn error) a message is
+logged, `monday-docs-sync--in-flight' is cleared, and ON-DONE is NOT
+called — the sync is abandoned at that point.
+
+When `monday-docs-sync-pre-sync-command' is nil or empty, ON-DONE is
+invoked immediately.  Emacs never blocks: the subprocess runs via
+`make-process' with a sentinel, so the UI stays responsive for the
+~seconds the external command takes."
+  (if (or (null monday-docs-sync-pre-sync-command)
+          (string-empty-p monday-docs-sync-pre-sync-command))
+      (funcall on-done)
+    (let* ((abs (expand-file-name (buffer-file-name)))
+           (out-buf (generate-new-buffer " *monday-docs-sync-pre-out*"))
+           (err-buf (generate-new-buffer " *monday-docs-sync-pre-err*"))
+           (cleanup (lambda ()
+                      (when (buffer-live-p out-buf) (kill-buffer out-buf))
+                      (when (buffer-live-p err-buf) (kill-buffer err-buf)))))
+      (message "monday-docs-sync: pre-command running (%s)…"
+               monday-docs-sync-pre-sync-command)
+      (condition-case spawn-err
+          (make-process
+           :name "monday-docs-sync-pre"
+           :command (list "sh" "-c"
+                          (format "%s %s"
+                                  monday-docs-sync-pre-sync-command
+                                  (shell-quote-argument abs)))
+           :buffer out-buf
+           :stderr err-buf
+           :connection-type 'pipe
+           :sentinel
+           (lambda (p _event)
+             (when (memq (process-status p) '(exit signal))
+               (let ((rc (process-exit-status p))
+                     (out (with-current-buffer out-buf (buffer-string)))
+                     (err (with-current-buffer err-buf (buffer-string))))
+                 (unwind-protect
+                     (if (zerop rc)
+                         (progn
+                           (message "monday-docs-sync: pre-command finished")
+                           (funcall on-done))
+                       (setq monday-docs-sync--in-flight nil)
+                       (message "monday-docs-sync: pre-command failed (rc=%d) — sync aborted; stdout=%s; stderr=%s"
+                                rc (string-trim out) (string-trim err)))
+                   (funcall cleanup))))))
+        (error
+         (setq monday-docs-sync--in-flight nil)
+         (funcall cleanup)
+         (message "monday-docs-sync: pre-command failed to spawn — %s"
+                  (error-message-string spawn-err)))))))
+
+(defun monday-docs-sync--attachments-from-keywords ()
+  "Return absolute paths from `#+MONDAY_ATTACH:' keywords (repeatable).
+Falls back to `monday-docs-sync-attachments' when no keywords are
+present.  Paths are resolved against the buffer's `default-directory'."
+  (let (acc)
+    (save-excursion
+      (goto-char (point-min))
+      (while (re-search-forward "^#\\+MONDAY_ATTACH:[ \t]*\\(.+\\)$" nil t)
+        (push (string-trim (match-string-no-properties 1)) acc)))
+    (mapcar (lambda (p) (expand-file-name p default-directory))
+            (or (nreverse acc) monday-docs-sync-attachments))))
 
 (defun monday-docs-sync--doc-id-from-url (url)
   "Extract Monday doc ID from URL.
@@ -719,11 +822,14 @@ and clears the in-flight marker so a new sync can start immediately."
   (setq monday-docs-sync--in-flight nil)
   (message "monday-docs-sync: aborted"))
 
-(defun monday-docs-sync--run-async (url-id blocks doc-url keyword-board-id)
+(defun monday-docs-sync--run-async (url-id blocks doc-url keyword-board-id attachments)
   "Kick off an async sync pipeline.  Reports progress via `message'.
 
 KEYWORD-BOARD-ID, when non-nil, is the id from the file's
-`#+MONDAY_BOARD:' keyword and wins over the doc's parent board."
+`#+MONDAY_BOARD:' keyword and wins over the doc's parent board.
+ATTACHMENTS is a list of absolute file paths uploaded as file blocks
+at the top of the doc, right after the readonly notice and the
+optional intro blockquote."
   (setq monday-docs-sync--in-flight t)
   (setq monday-docs-sync--abort nil)
   (let ((doc-id nil)           ; resolved later
@@ -733,6 +839,7 @@ KEYWORD-BOARD-ID, when non-nil, is the id from the file's
         (written 1)            ; counts the notice block
         (images 0)
         (diagrams 0)
+        (attached 0)
         (total-blocks (length blocks)))
     (cl-labels
         ((done-failure (msg)
@@ -740,8 +847,8 @@ KEYWORD-BOARD-ID, when non-nil, is the id from the file's
            (message "monday-docs-sync: failed — %s" msg))
          (done-success ()
            (setq monday-docs-sync--in-flight nil)
-           (message "monday-docs-sync: done — wrote %d block(s), %d image(s), %d diagram(s) → %s"
-                    written images diagrams doc-url))
+           (message "monday-docs-sync: done — wrote %d block(s), %d image(s), %d diagram(s), %d attachment(s) → %s"
+                    written images diagrams attached doc-url))
          (step-lookup ()
            (message "monday-docs-sync: resolving doc id…")
            (monday-docs-sync--graphql-async
@@ -833,8 +940,113 @@ KEYWORD-BOARD-ID, when non-nil, is the id from the file's
                     (cons 'after nil))
               (lambda (data)
                 (setq last-id (alist-get 'id (alist-get 'create_doc_block data)))
-                (step-next-block blocks 1))
+                (step-create-intro))
               #'done-failure)))
+         (step-create-intro ()
+           ;; Blockquote between readonly notice and attachments.  Uses
+           ;; the `quote' block type; if Monday rejects it, fall back
+           ;; would be an italic `normal_text' paragraph — adjust here.
+           (cond
+            ((or (null monday-docs-sync-intro-notice)
+                 (string-empty-p monday-docs-sync-intro-notice))
+             (step-upload-attachments-next attachments))
+            (t
+             (message "monday-docs-sync: writing intro blockquote…")
+             (let ((content
+                    (list (cons 'alignment "left")
+                          (cons 'direction "ltr")
+                          (cons 'deltaFormat
+                                (vector (list (cons 'insert
+                                                    monday-docs-sync-intro-notice)
+                                              (cons 'attributes
+                                                    (list (cons 'italic t)))))))))
+               (monday-docs-sync--graphql-async
+                monday-docs-sync--create-mutation
+                (list (cons 'doc doc-id)
+                      (cons 'type "quote")
+                      (cons 'content (json-encode content))
+                      (cons 'after last-id))
+                (lambda (data)
+                  (setq last-id (alist-get 'id (alist-get 'create_doc_block data)))
+                  (setq written (1+ written))
+                  (step-upload-attachments-next attachments))
+                (lambda (msg)
+                  ;; Monday may not support `quote' — retry once as italic
+                  ;; normal_text, then give up and continue without the
+                  ;; blockquote rather than failing the whole sync.
+                  (message "monday-docs-sync: quote block rejected (%s); retrying as italic normal_text"
+                           msg)
+                  (monday-docs-sync--graphql-async
+                   monday-docs-sync--create-mutation
+                   (list (cons 'doc doc-id)
+                         (cons 'type "normal_text")
+                         (cons 'content (json-encode content))
+                         (cons 'after last-id))
+                   (lambda (data)
+                     (setq last-id (alist-get 'id (alist-get 'create_doc_block data)))
+                     (setq written (1+ written))
+                     (step-upload-attachments-next attachments))
+                   (lambda (_)
+                     (message "monday-docs-sync: intro blockquote skipped (both block types rejected)")
+                     (step-upload-attachments-next attachments)))))))))
+         (attach-as-link (asset-url path rest)
+           ;; Monday's `DocBlockContentType' enum has no `file' member —
+           ;; the doc-level attachment cards visible in the Monday UI
+           ;; are not reachable via `create_doc_block'.  We emit a
+           ;; `normal_text' block instead: a paperclip emoji followed
+           ;; by the filename rendered as a bold link to the uploaded
+           ;; asset.  Visible, clickable, survives re-sync.
+           (let* ((filename (file-name-nondirectory path))
+                  (content
+                   (list (cons 'alignment "left")
+                         (cons 'direction "ltr")
+                         (cons 'deltaFormat
+                               (vector
+                                (list (cons 'insert "📎 "))
+                                (list (cons 'insert filename)
+                                      (cons 'attributes
+                                            (list (cons 'bold t)
+                                                  (cons 'link asset-url)))))))))
+             (monday-docs-sync--graphql-async
+              monday-docs-sync--create-mutation
+              (list (cons 'doc doc-id)
+                    (cons 'type "normal_text")
+                    (cons 'content (json-encode content))
+                    (cons 'after last-id))
+              (lambda (data)
+                (setq last-id (alist-get 'id (alist-get 'create_doc_block data)))
+                (setq written (1+ written))
+                (setq attached (1+ attached))
+                (step-upload-attachments-next rest))
+              #'done-failure)))
+         (step-upload-attachments-next (remaining)
+           (cond
+            (monday-docs-sync--abort
+             (setq monday-docs-sync--in-flight nil)
+             (message "monday-docs-sync: aborted during attachments phase"))
+            ((null remaining)
+             (step-next-block blocks 1))
+            (t
+             (let ((path (car remaining))
+                   (rest (cdr remaining)))
+               (cond
+                ((not (file-readable-p path))
+                 (message "monday-docs-sync: attachment %s unreadable, skipping" path)
+                 (step-upload-attachments-next rest))
+                ((null upload-target)
+                 (message "monday-docs-sync: no upload target, skipping attachment %s"
+                          (file-name-nondirectory path))
+                 (step-upload-attachments-next rest))
+                (t
+                 (message "monday-docs-sync: uploading attachment %s…"
+                          (file-name-nondirectory path))
+                 (monday-docs-sync--upload-file-async
+                  path upload-target
+                  (lambda (asset-url) (attach-as-link asset-url path rest))
+                  (lambda (msg)
+                    (message "monday-docs-sync: attachment upload failed (%s); skipping %s"
+                             msg (file-name-nondirectory path))
+                    (step-upload-attachments-next rest)))))))))
          (step-next-block (remaining idx)
            (cond
             (monday-docs-sync--abort
@@ -934,30 +1146,46 @@ off — org-babel isn't thread-safe."
     (user-error "Not an org-mode buffer"))
   (when monday-docs-sync--in-flight
     (user-error "A monday-docs-sync is already running — wait for it to finish"))
-  (let ((url-id (monday-docs-sync--resolve-target)))
+  (let ((url-id (monday-docs-sync--resolve-target))
+        (src-buffer (current-buffer)))
     (monday-docs-sync--token)           ; fail early if missing
     (when (and monday-docs-sync-force-render (buffer-modified-p))
       (save-buffer))
-    (let* ((stale (if monday-docs-sync-force-render
-                      (monday-docs-sync--collect-stale-plantuml)
-                    nil))
-           (all-blocks (monday-docs-sync--parse-buffer))
-           (blocks (if monday-docs-sync-max-blocks
-                       (seq-take all-blocks monday-docs-sync-max-blocks)
-                     all-blocks))
-           (url (monday-docs-sync--doc-url-from-keyword))
-           (keyword-board-id (monday-docs-sync--board-id-from-keyword))
-           (start-http (lambda ()
-                         (message "monday-docs-sync: starting — %d/%d block(s) to write → %s"
-                                  (length blocks) (length all-blocks) url)
-                         (monday-docs-sync--run-async url-id blocks url
-                                                      keyword-board-id))))
-      (cond
-       ((null stale) (funcall start-http))
-       (t
-        (message "monday-docs-sync: rendering %d stale PlantUML diagram(s) async…"
-                 (length stale))
-        (monday-docs-sync--render-queue-async stale start-http))))))
+    ;; Claim the in-flight lock before the async pre-command runs so a
+    ;; second `M-x monday-docs-sync' invocation can't race us.  The lock
+    ;; is released on any failure path (pre-command fail, spawn fail,
+    ;; sync fail) and by `monday-docs-sync--run-async' on success.
+    (setq monday-docs-sync--in-flight t)
+    (monday-docs-sync--run-pre-sync-command-async
+     (lambda ()
+       ;; Re-enter the source buffer — sentinel callbacks run in whatever
+       ;; buffer happens to be current, which is rarely the one the user
+       ;; invoked the command from.
+       (when (buffer-live-p src-buffer)
+         (with-current-buffer src-buffer
+           (let* ((stale (if monday-docs-sync-force-render
+                             (monday-docs-sync--collect-stale-plantuml)
+                           nil))
+                  (all-blocks (monday-docs-sync--parse-buffer))
+                  (blocks (if monday-docs-sync-max-blocks
+                              (seq-take all-blocks monday-docs-sync-max-blocks)
+                            all-blocks))
+                  (url (monday-docs-sync--doc-url-from-keyword))
+                  (keyword-board-id (monday-docs-sync--board-id-from-keyword))
+                  (attachments (monday-docs-sync--attachments-from-keywords))
+                  (start-http (lambda ()
+                                (message "monday-docs-sync: starting — %d/%d block(s) to write, %d attachment(s) → %s"
+                                         (length blocks) (length all-blocks)
+                                         (length attachments) url)
+                                (monday-docs-sync--run-async url-id blocks url
+                                                             keyword-board-id
+                                                             attachments))))
+             (cond
+              ((null stale) (funcall start-http))
+              (t
+               (message "monday-docs-sync: rendering %d stale PlantUML diagram(s) async…"
+                        (length stale))
+               (monday-docs-sync--render-queue-async stale start-http))))))))))
 
 (provide 'monday-docs-sync)
 ;;; monday-docs-sync.el ends here

@@ -1452,35 +1452,90 @@ Tuned a little longer than typical typing cadence so normal editing
 doesn't repeatedly fire babel."
   :type 'number)
 
+;; `org-babel-execute-src-block' reads `org-confirm-babel-evaluate' via
+;; dynamic scope. Declare it special so `let'-binding it below doesn't
+;; trigger an "unused lexical variable" warning under lexical-binding.
+(defvar org-confirm-babel-evaluate)
+
+;; Silence byte-compiler — these are always available at runtime because
+;; auto-render only fires inside `org-mode' buffers.
+(declare-function org-element-map "org-element" (data types fun &optional info first-match no-recursion with-affiliated))
+(declare-function org-element-parse-buffer "org-element" (&optional granularity visible-only))
+(declare-function org-element-property "org-element" (property element))
+(declare-function org-display-inline-images "org" (&optional include-linked refresh beg end))
+
 (defvar-local claude-collab--auto-render-timer nil)
 (defvar-local claude-collab--auto-render-hashes nil
-  "Alist `((BEG . HASH) …)' of blocks already rendered for their current body.")
+  "Alist `((TARGET-FILE . HASH) …)' of blocks already rendered for their
+current body. Keyed by the block's `:file' header (stable across edits)
+rather than buffer position, which shifts when RESULTS stanzas are
+inserted mid-buffer by concurrent sentinels.")
 (defvar claude-collab--auto-render-running nil
   "Non-nil while a render pass is in progress; suppresses re-scheduling.")
 
 (defvar-local claude-collab--auto-render-in-flight nil
-  "Set of (BEG . HASH) pairs currently being rendered asynchronously.
+  "Set of (TARGET-FILE . HASH) pairs currently being rendered asynchronously.
 Used to avoid re-firing the same block while its subprocess is still
 running, without poisoning the success-only hash map when the render
 fails.")
 
-(defun claude-collab--auto-render-record-success (buf beg hash)
-  "Mark block at BEG in BUF as successfully rendered with HASH."
+(defvar-local claude-collab--redisplay-timer nil
+  "Buffer-local idle timer that coalesces inline-image refreshes.
+When multiple plantuml sentinels finish within a short window, each
+schedules this timer; the last writer wins, so the buffer gets a single
+redisplay pass instead of one per sentinel. Guards against concurrent
+`org-element' cache walks that otherwise corrupt the cache.")
+
+(defun claude-collab--auto-render-record-success (buf target hash)
+  "Mark TARGET in BUF as successfully rendered with HASH."
   (when (buffer-live-p buf)
     (with-current-buffer buf
-      (setf (alist-get beg claude-collab--auto-render-hashes) hash)
+      (setf (alist-get target claude-collab--auto-render-hashes
+                       nil nil #'equal)
+            hash)
       (setq claude-collab--auto-render-in-flight
-            (delete (cons beg hash)
-                    claude-collab--auto-render-in-flight)))))
+            (cl-delete (cons target hash)
+                       claude-collab--auto-render-in-flight
+                       :test #'equal)))))
 
-(defun claude-collab--auto-render-record-failure (buf beg hash)
-  "Release the in-flight lock for block at BEG in BUF without stamping HASH.
+(defun claude-collab--auto-render-record-failure (buf target hash)
+  "Release the in-flight lock for TARGET in BUF without stamping HASH.
 Leaves the last-known-good hash alone so the next scheduler tick retries."
   (when (buffer-live-p buf)
     (with-current-buffer buf
       (setq claude-collab--auto-render-in-flight
-            (delete (cons beg hash)
-                    claude-collab--auto-render-in-flight)))))
+            (cl-delete (cons target hash)
+                       claude-collab--auto-render-in-flight
+                       :test #'equal)))))
+
+(defun claude-collab--schedule-redisplay (buf)
+  "Debounce `org-display-inline-images' for BUF.
+Cancels any pending redisplay timer and installs a fresh 0.15s idle
+timer. When N plantuml sentinels all finish within that window, only
+one redisplay pass runs — preventing concurrent `org-element' cache
+walks that produce `(wrong-type-argument integer-or-marker-p nil)'
+and \"Invalid :struct\" errors."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (when (timerp claude-collab--redisplay-timer)
+        (cancel-timer claude-collab--redisplay-timer))
+      (setq claude-collab--redisplay-timer
+            (run-with-idle-timer
+             0.15 nil
+             (lambda ()
+               (when (buffer-live-p buf)
+                 (with-current-buffer buf
+                   (setq claude-collab--redisplay-timer nil)
+                   ;; `org-display-inline-images' with REFRESH=t is the
+                   ;; region-aware equivalent of
+                   ;; `org-redisplay-inline-images' and avoids the
+                   ;; toggle-off / toggle-on glitch.
+                   (when (derived-mode-p 'org-mode)
+                     (condition-case err
+                         (org-display-inline-images nil t)
+                       (error
+                        (message "claude-collab: redisplay failed: %s"
+                                 (error-message-string err)))))))))))))
 
 (defun claude-collab--ensure-result-link (buf beg-block target-file)
   "Ensure the src block starting at BEG-BLOCK in BUF is followed by
@@ -1492,11 +1547,21 @@ file link for org to overlay the image onto. This helper inserts a
 minimal RESULTS stanza when absent, matching the src block's own
 leading whitespace so org's element parser keeps the RESULTS block
 associated with the preceding src block (indentation mismatch makes
-org treat the link as body text and skip inline display)."
+org treat the link as body text and skip inline display).
+
+BEG-BLOCK may be an integer or a marker. Markers are preferred: when
+multiple sentinels finish concurrently, the first RESULTS insertion
+shifts every later block's position, and a marker auto-tracks that
+shift. A stale integer would land mid-block and corrupt the element
+cache."
   (when (buffer-live-p buf)
     (with-current-buffer buf
-      (save-excursion
-        (goto-char beg-block)
+      (let ((pos (if (markerp beg-block)
+                     (marker-position beg-block)
+                   beg-block)))
+       (when pos
+        (save-excursion
+          (goto-char pos)
         ;; Capture the indentation of the `#+BEGIN_SRC' line so the
         ;; RESULTS stanza can match it.
         (let ((indent (buffer-substring-no-properties
@@ -1509,22 +1574,35 @@ org treat the link as body text and skip inline display)."
               (while (looking-at "^[ \t]*$") (forward-line 1))
               (unless (looking-at "^[ \t]*#\\+RESULTS:")
                 (goto-char after-end)
-                (let ((inhibit-modification-hooks t))
-                  (insert "\n" indent "#+RESULTS:\n"
-                          indent "[[file:" target-file "]]\n"))))))))))
+                ;; Do NOT bind `inhibit-modification-hooks' here: this is
+                ;; a lasting text edit, and suppressing change hooks
+                ;; desyncs `org-element's cache. The next
+                ;; `org-redisplay-inline-images' then walks stale cache
+                ;; nodes and errors with
+                ;; `(wrong-type-argument integer-or-marker-p nil)'.
+                ;; See (elisp) Change Hooks — `inhibit-modification-hooks'.
+                (insert "\n" indent "#+RESULTS:\n"
+                        indent "[[file:" target-file "]]\n")))))))))))
 
 (defun claude-collab--render-plantuml-async (body target-file buf beg hash)
   "Render plantuml BODY into TARGET-FILE in a background process.
-TARGET-FILE is resolved relative to BUF's `default-directory'. BEG /
-HASH identify the src block for hash bookkeeping: hash is only
-stamped on success, so a failed render will be retried on the next
-scheduler tick. Errors surface in the echo area with plantuml's
-stderr — no silent drops."
+TARGET-FILE is resolved relative to BUF's `default-directory'. BEG is a
+marker (preferred) or integer pointing at the src block's `:begin'.
+When several plantuml processes finish within a short window, markers
+auto-track the RESULTS insertions performed by earlier sentinels; stale
+integers would land mid-block and corrupt `org-element's cache. HASH
+identifies the current block body for bookkeeping and is stamped only
+on success, so a failed render is retried on the next scheduler tick.
+Errors surface in the echo area with plantuml's stderr — no silent
+drops. Redisplay is coalesced via
+`claude-collab--schedule-redisplay' so N concurrent sentinels produce
+one inline-image refresh instead of N."
   (let* ((plantuml (executable-find "plantuml")))
     (if (not plantuml)
         (progn
           (message "claude-collab: `plantuml' not on exec-path; skipping async render")
-          (claude-collab--auto-render-record-failure buf beg hash))
+          (claude-collab--auto-render-record-failure buf target-file hash)
+          (when (markerp beg) (set-marker beg nil)))
       (let* ((abs-target (expand-file-name
                           target-file
                           (with-current-buffer buf default-directory)))
@@ -1548,21 +1626,26 @@ stderr — no silent drops."
              (unwind-protect
                  (if (zerop (process-exit-status proc))
                      (progn
-                       (claude-collab--auto-render-record-success buf beg hash)
+                       ;; Order matters: insert RESULTS first so the
+                       ;; redisplay pass (scheduled below) sees the new
+                       ;; link; record success afterward.
                        (claude-collab--ensure-result-link
                         buf beg target-file)
+                       (claude-collab--auto-render-record-success
+                        buf target-file hash)
                        (when (buffer-live-p buf)
-                         (with-current-buffer buf
-                           ;; Same target path → Emacs caches the old
-                           ;; bitmap. Invalidate just that file (not
-                           ;; the whole cache) before redisplay.
-                           (clear-image-cache abs-target)
-                           (org-redisplay-inline-images))))
-                   (claude-collab--auto-render-record-failure buf beg hash)
+                         ;; Same target path → Emacs caches the old
+                         ;; bitmap. Invalidate just that file (not the
+                         ;; whole cache) before the debounced redisplay.
+                         (clear-image-cache abs-target)
+                         (claude-collab--schedule-redisplay buf)))
+                   (claude-collab--auto-render-record-failure
+                    buf target-file hash)
                    (message "claude-collab: plantuml failed (%s): %s"
                             (process-exit-status proc)
                             (with-current-buffer stderr-buf
                               (string-trim (buffer-string)))))
+               (when (markerp beg) (set-marker beg nil))
                (ignore-errors (delete-file puml-file))
                (when (buffer-live-p stderr-buf)
                  (kill-buffer stderr-buf))))))))))
@@ -1574,42 +1657,63 @@ responsive; dot/ditaa/mermaid fall back to the synchronous babel
 path. The hash map is only updated on success, so a failed render
 (e.g. missing plantuml binary, invalid syntax) will be retried the
 next time the idle timer fires. Optional TARGET-BUFFER defaults to
-the current buffer."
+the current buffer.
+
+Walks src blocks via `org-element-map' — no dynamic-scope reliance
+on `org-babel-map-src-blocks' expansion-time bindings, which fail
+under `lexical-binding: t' when the macro hasn't been force-loaded."
   (let ((buf (or target-buffer (current-buffer))))
     (when (and (buffer-live-p buf)
                (not claude-collab--auto-render-running))
       (with-current-buffer buf
         (when (derived-mode-p 'org-mode)
-          (let ((claude-collab--auto-render-running t)
-                (org-confirm-babel-evaluate nil))
+          (let ((claude-collab--auto-render-running t))
             (save-excursion
-              (org-babel-map-src-blocks nil
-                (when (member lang claude-collab-auto-render-diagrams-languages)
-                  (let* ((params (nth 2 (org-babel-get-src-block-info 'light)))
-                         (target (cdr (assq :file params)))
-                         (current-hash (and target (md5 (or body ""))))
-                         (last-hash (and target
-                                         (alist-get beg-block
-                                                    claude-collab--auto-render-hashes)))
-                         (in-flight-key (cons beg-block current-hash)))
-                    (when (and target
-                               (not (equal current-hash last-hash))
-                               (not (member in-flight-key
-                                            claude-collab--auto-render-in-flight)))
-                      (push in-flight-key claude-collab--auto-render-in-flight)
-                      (if (string= lang "plantuml")
-                          (claude-collab--render-plantuml-async
-                           body target buf beg-block current-hash)
-                        (condition-case err
-                            (progn
-                              (org-babel-execute-src-block)
-                              (claude-collab--auto-render-record-success
-                               buf beg-block current-hash))
-                          (error
-                           (claude-collab--auto-render-record-failure
-                            buf beg-block current-hash)
-                           (message "claude-collab: %s render failed: %s"
-                                    lang (error-message-string err))))))))))))))))
+              (org-element-map (org-element-parse-buffer) 'src-block
+                (lambda (element)
+                  (let* ((lang (org-element-property :language element))
+                         (body (org-element-property :value element))
+                         (beg-block (org-element-property :begin element)))
+                    (when (and lang beg-block
+                               (member lang
+                                       claude-collab-auto-render-diagrams-languages))
+                      (let* ((params (org-babel-parse-header-arguments
+                                      (or (org-element-property :parameters element)
+                                          "")))
+                             (target (cdr (assq :file params)))
+                             (current-hash (and target (md5 (or body ""))))
+                             (last-hash (and target
+                                             (alist-get target
+                                                        claude-collab--auto-render-hashes
+                                                        nil nil #'equal)))
+                             (in-flight-key (and target
+                                                 (cons target current-hash))))
+                        (when (and target
+                                   (not (equal current-hash last-hash))
+                                   (not (member in-flight-key
+                                                claude-collab--auto-render-in-flight)))
+                          (push in-flight-key claude-collab--auto-render-in-flight)
+                          (if (string= lang "plantuml")
+                              ;; Wrap beg-block in a marker so concurrent
+                              ;; RESULTS insertions from other sentinels
+                              ;; auto-shift this block's position; the
+                              ;; sentinel releases the marker in its
+                              ;; unwind-protect.
+                              (claude-collab--render-plantuml-async
+                               body target buf (copy-marker beg-block) current-hash)
+                            (let ((org-confirm-babel-evaluate nil))
+                              (save-excursion
+                                (goto-char beg-block)
+                                (condition-case err
+                                    (progn
+                                      (org-babel-execute-src-block)
+                                      (claude-collab--auto-render-record-success
+                                       buf target current-hash))
+                                  (error
+                                   (claude-collab--auto-render-record-failure
+                                    buf target current-hash)
+                                   (message "claude-collab: %s render failed: %s"
+                                            lang (error-message-string err))))))))))))))))))))
 
 (defun claude-collab--auto-render-schedule (&rest _)
   "`after-change-functions' hook: (re)start the idle timer."
@@ -1646,7 +1750,10 @@ re-rendered.  Inline image previews refresh automatically."
                  #'claude-collab--auto-render-schedule t)
     (when (timerp claude-collab--auto-render-timer)
       (cancel-timer claude-collab--auto-render-timer)
-      (setq claude-collab--auto-render-timer nil))))
+      (setq claude-collab--auto-render-timer nil))
+    (when (timerp claude-collab--redisplay-timer)
+      (cancel-timer claude-collab--redisplay-timer)
+      (setq claude-collab--redisplay-timer nil))))
 
 ;; Auto-enable in all org buffers. Users who don't want it can
 ;;   (remove-hook 'org-mode-hook #'claude-collab-auto-render-diagrams-mode)
@@ -1732,23 +1839,457 @@ waiting on in this file\"."
                             (window-height . 0.3))))))
 
 
+;;; CLARIFY navigation + review (design-skill integration)
+;;
+;; The /design skill emits two kinds of CLARIFY markers in org plans:
+;;   - inline: =[CLARIFY: question]= spans inside prose
+;;   - heading: org headings with the CLARIFY TODO keyword
+;; These helpers let the user rapid-walk the plan, answer each in place,
+;; and jump to the mirrored `* Open questions' checklist.
+
+(defconst claude-collab--clarify-inline-re
+  "=\\[CLARIFY:[ \t]*\\(.*?\\)\\]="
+  "Regex for inline CLARIFY markers. Group 1 is the question text.")
+
+(defconst claude-collab--clarify-heading-re
+  "^\\*+[ \t]+CLARIFY\\_>"
+  "Regex for org headings carrying the CLARIFY TODO keyword.")
+
+(defun claude-collab--clarify-at-point ()
+  "Return plist describing the CLARIFY marker at point, or nil.
+Plist keys: :kind (\\='inline or \\='heading), :begin, :end, :question."
+  (or (save-excursion
+        (let ((orig (point)) found)
+          (beginning-of-line)
+          (while (and (not found)
+                      (re-search-forward claude-collab--clarify-inline-re
+                                         (line-end-position) t))
+            (when (and (<= (match-beginning 0) orig)
+                       (<= orig (match-end 0)))
+              (setq found (list :kind 'inline
+                                :begin (match-beginning 0)
+                                :end (match-end 0)
+                                :question (match-string-no-properties 1)))))
+          found))
+      (and (derived-mode-p 'org-mode)
+           (save-excursion
+             (ignore-errors
+               (org-back-to-heading t)
+               (when (looking-at claude-collab--clarify-heading-re)
+                 (list :kind 'heading
+                       :begin (line-beginning-position)
+                       :end (line-end-position)
+                       :question (buffer-substring-no-properties
+                                  (line-beginning-position)
+                                  (line-end-position)))))))))
+
+(defun claude-collab--clarify-positions ()
+  "Return list of CLARIFY plists in the current buffer, in document order.
+Each plist has :kind, :begin, :end, :question, :line."
+  (let (results)
+    (save-excursion
+      (goto-char (point-min))
+      (while (re-search-forward claude-collab--clarify-inline-re nil t)
+        (push (list :kind 'inline
+                    :begin (match-beginning 0)
+                    :end (match-end 0)
+                    :question (match-string-no-properties 1)
+                    :line (line-number-at-pos (match-beginning 0)))
+              results))
+      (goto-char (point-min))
+      (while (re-search-forward claude-collab--clarify-heading-re nil t)
+        (push (list :kind 'heading
+                    :begin (line-beginning-position)
+                    :end (line-end-position)
+                    :question (buffer-substring-no-properties
+                               (line-beginning-position) (line-end-position))
+                    :line (line-number-at-pos (line-beginning-position)))
+              results)))
+    (sort results (lambda (a b) (< (plist-get a :begin) (plist-get b :begin))))))
+
+(defun claude-collab--clarify-counts ()
+  "Return (INLINE . HEADING) counts for the current buffer."
+  (let ((inline 0) (heading 0))
+    (dolist (c (claude-collab--clarify-positions))
+      (if (eq (plist-get c :kind) 'inline)
+          (cl-incf inline)
+        (cl-incf heading)))
+    (cons inline heading)))
+
+(defun claude-collab-next-clarify ()
+  "Jump to the next CLARIFY marker after point."
+  (interactive)
+  (let* ((all (claude-collab--clarify-positions))
+         (after (cl-find-if (lambda (c) (> (plist-get c :begin) (point))) all)))
+    (if after
+        (progn (goto-char (plist-get after :begin))
+               (message "CLARIFY [%s] L%d: %s"
+                        (plist-get after :kind)
+                        (plist-get after :line)
+                        (plist-get after :question)))
+      (user-error "No more CLARIFY markers"))))
+
+(defun claude-collab-prev-clarify ()
+  "Jump to the previous CLARIFY marker before point."
+  (interactive)
+  (let* ((all (claude-collab--clarify-positions))
+         (before (cl-remove-if (lambda (c) (>= (plist-get c :begin) (point))) all))
+         (target (car (last before))))
+    (if target
+        (progn (goto-char (plist-get target :begin))
+               (message "CLARIFY [%s] L%d: %s"
+                        (plist-get target :kind)
+                        (plist-get target :line)
+                        (plist-get target :question)))
+      (user-error "No previous CLARIFY markers"))))
+
+(defun claude-collab--clarify-list-jump ()
+  "From the *clarifys* side-window, jump to the CLARIFY at point in source."
+  (interactive)
+  (let ((c (get-text-property (point) 'claude-collab-clarify))
+        (src (get-text-property (point) 'claude-collab-src)))
+    (unless (and c src (buffer-live-p src))
+      (user-error "No CLARIFY on this line"))
+    (pop-to-buffer src)
+    (goto-char (plist-get c :begin))))
+
+(defun claude-collab-list-clarifys ()
+  "List CLARIFY markers in the current buffer in a side window.
+RET on a line jumps to that marker in the source buffer."
+  (interactive)
+  (let* ((src (current-buffer))
+         (src-name (buffer-name src))
+         (entries (claude-collab--clarify-positions)))
+    (unless entries
+      (user-error "No CLARIFY markers in %s" src-name))
+    (let ((buf (get-buffer-create "*claude-collab: clarifys*")))
+      (with-current-buffer buf
+        (let ((inhibit-read-only t))
+          (erase-buffer)
+          (insert (format "CLARIFY markers in %s  (%d)\n" src-name (length entries)))
+          (insert (make-string 60 ?─) "\n\n")
+          (dolist (c entries)
+            (let ((start (point)))
+              (insert (format "[%s] L%-4d  %s\n"
+                              (if (eq (plist-get c :kind) 'inline) "inline " "heading")
+                              (plist-get c :line)
+                              (plist-get c :question)))
+              (put-text-property start (1- (point)) 'claude-collab-clarify c)
+              (put-text-property start (1- (point)) 'claude-collab-src src))))
+        (goto-char (point-min))
+        (forward-line 3)
+        (setq-local buffer-read-only t)
+        (local-set-key (kbd "RET") #'claude-collab--clarify-list-jump)
+        (local-set-key (kbd "q") #'quit-window))
+      (display-buffer buf '((display-buffer-in-side-window)
+                            (side . bottom)
+                            (window-height . 0.3)))
+      (select-window (get-buffer-window buf)))))
+
+(defun claude-collab-answer-clarify-at-point ()
+  "Answer the CLARIFY marker at point.
+Prompts for an answer, then creates an `org-remark' annotation over
+the marker with the answer as label. `/design revise' applies it."
+  (interactive)
+  (let ((c (claude-collab--clarify-at-point)))
+    (unless c
+      (user-error "No CLARIFY marker at point (use `c' to annotate an arbitrary region)"))
+    (let* ((q (plist-get c :question))
+           (answer (read-string
+                    (format "Answer [%s]: "
+                            (truncate-string-to-width q 60 nil nil "…")))))
+      (when (string-empty-p (string-trim answer))
+        (user-error "Empty answer — aborted"))
+      (claude-collab-add-annotation (plist-get c :begin) (plist-get c :end) answer)
+      (message "Answered CLARIFY. Run `/design revise' to apply."))))
+
+(defun claude-collab-jump-to-open-questions ()
+  "Jump to the `* Open questions' heading in the current buffer."
+  (interactive)
+  (let ((orig (point)))
+    (goto-char (point-min))
+    (if (re-search-forward "^\\*+[ \t]+Open questions\\b" nil t)
+        (beginning-of-line)
+      (goto-char orig)
+      (user-error "No `* Open questions' heading in this buffer"))))
+
+
+;;; HUD side-window — non-modal live status for an org plan
+
+(defconst claude-collab--hud-buffer-name "*claude-collab: hud*"
+  "Name of the single shared HUD display buffer.")
+
+(defvar claude-collab--hud-source-buffers nil
+  "Set (list) of source buffers currently tracked by a HUD.
+Each element is a live org buffer in which `claude-collab-hud-mode'
+is enabled. When the set becomes empty the HUD is torn down.")
+
+(defvar claude-collab--hud-current-source nil
+  "Source buffer whose state the HUD is currently displaying.
+May lag behind `current-buffer' briefly when focus moves between
+tracked buffers; gets re-pointed by `claude-collab--hud-refresh'.")
+
+(defvar claude-collab--hud-refresh-timer nil
+  "Idle timer debouncing HUD refreshes. Shared across all source buffers.")
+
+(defcustom claude-collab-hud-refresh-delay 0.2
+  "Idle seconds to wait before redrawing the HUD after a change.
+Short enough to feel live, long enough that rapid typing doesn't
+trigger a redraw on every keystroke."
+  :type 'number
+  :group 'claude-collab)
+
+(defun claude-collab--hud-target-buffer ()
+  "Return the buffer the HUD should read counts from.
+Prefer the current buffer if it's being tracked; else fall back
+to the last known source buffer (marked stale by the caller)."
+  (cond
+   ((memq (current-buffer) claude-collab--hud-source-buffers)
+    (current-buffer))
+   ((and claude-collab--hud-current-source
+         (buffer-live-p claude-collab--hud-current-source))
+    claude-collab--hud-current-source)
+   (t
+    (car (cl-remove-if-not #'buffer-live-p
+                           claude-collab--hud-source-buffers)))))
+
+(defun claude-collab--hud-render (src stale)
+  "Return the HUD text string for SRC buffer.
+When STALE is non-nil the header is marked so the user can tell
+they're looking at cached state from a no-longer-visible buffer."
+  (if (not (buffer-live-p src))
+      "Claude Collab HUD  —  (no tracked buffer)\n"
+    (with-current-buffer src
+      (let* ((counts (ignore-errors (claude-collab--clarify-counts)))
+             (inline (or (car counts) 0))
+             (heading (or (cdr counts) 0))
+             (total (+ inline heading))
+             (anns (or (ignore-errors
+                         (length (claude-collab--annotations-in-buffer
+                                  (current-buffer))))
+                       0))
+             (sid (claude-collab--current-session-id))
+             (edits (length (claude-collab-session-edits sid))))
+        (concat
+         (format "Claude Collab: %s%s\n"
+                 (buffer-name) (if stale "  (stale)" ""))
+         (format "  CLARIFY   %d inline · %d heading · %d total   ·   annotations: %d\n"
+                 inline heading total anns)
+         (format "  Session   %s (%d edits)\n" sid edits)
+         "\n"
+         "  SPC o c n/p  next/prev CLARIFY    SPC o c a  answer at point\n"
+         "  SPC o c L    list CLARIFYs        SPC o c o  → Open questions\n"
+         "  ] c  / [ c   bracket motion       SPC o c m  full menu\n")))))
+
+(defun claude-collab--hud-ensure-window ()
+  "Display the HUD buffer in a bottom side-window without stealing focus."
+  (let ((buf (get-buffer-create claude-collab--hud-buffer-name)))
+    (with-current-buffer buf
+      (setq buffer-read-only t)
+      (setq mode-line-format nil)
+      (setq cursor-type nil))
+    (unless (get-buffer-window buf t)
+      (display-buffer-in-side-window
+       buf '((side . bottom)
+             (slot . 0)
+             (window-height . 7)
+             (preserve-size . (nil . t))
+             (no-other-window . t))))
+    buf))
+
+(defun claude-collab--hud-redraw ()
+  "Redraw the HUD buffer from the currently-targeted source buffer."
+  (when claude-collab--hud-source-buffers
+    (let* ((candidate (claude-collab--hud-target-buffer))
+           (stale (not (memq (current-buffer) claude-collab--hud-source-buffers))))
+      (when (buffer-live-p candidate)
+        (setq claude-collab--hud-current-source candidate))
+      (let ((buf (claude-collab--hud-ensure-window))
+            (text (claude-collab--hud-render claude-collab--hud-current-source
+                                             stale)))
+        (with-current-buffer buf
+          (let ((inhibit-read-only t))
+            (erase-buffer)
+            (insert text)
+            (goto-char (point-min))))))))
+
+(defun claude-collab--hud-schedule ()
+  "Debounced refresh trigger — fires after a short idle."
+  (when (timerp claude-collab--hud-refresh-timer)
+    (cancel-timer claude-collab--hud-refresh-timer))
+  (setq claude-collab--hud-refresh-timer
+        (run-with-idle-timer claude-collab-hud-refresh-delay nil
+                             #'claude-collab--hud-redraw)))
+
+(defun claude-collab--hud-after-change (&rest _)
+  "`after-change-functions' hook — schedule a debounced HUD redraw."
+  (claude-collab--hud-schedule))
+
+(defun claude-collab--hud-post-command ()
+  "`post-command-hook' — schedule a debounced HUD redraw."
+  (claude-collab--hud-schedule))
+
+(defun claude-collab--hud-window-config-change ()
+  "`window-configuration-change-hook' — redraw immediately on layout change."
+  (when claude-collab--hud-source-buffers
+    (claude-collab--hud-redraw)))
+
+(defun claude-collab--hud-kill-buffer-hook ()
+  "Detach HUD state when a tracked source buffer is killed."
+  (setq claude-collab--hud-source-buffers
+        (delq (current-buffer) claude-collab--hud-source-buffers))
+  (unless claude-collab--hud-source-buffers
+    (claude-collab--hud-teardown)))
+
+(defun claude-collab--hud-install-global-hooks ()
+  "Add hooks shared across all tracked buffers. Idempotent."
+  (add-hook 'window-configuration-change-hook
+            #'claude-collab--hud-window-config-change)
+  (add-hook 'post-command-hook #'claude-collab--hud-post-command))
+
+(defun claude-collab--hud-remove-global-hooks ()
+  "Counterpart to `claude-collab--hud-install-global-hooks'."
+  (remove-hook 'window-configuration-change-hook
+               #'claude-collab--hud-window-config-change)
+  (remove-hook 'post-command-hook #'claude-collab--hud-post-command))
+
+(defun claude-collab--hud-teardown ()
+  "Close HUD window, cancel timer, drop global hooks."
+  (when (timerp claude-collab--hud-refresh-timer)
+    (cancel-timer claude-collab--hud-refresh-timer)
+    (setq claude-collab--hud-refresh-timer nil))
+  (claude-collab--hud-remove-global-hooks)
+  (let ((buf (get-buffer claude-collab--hud-buffer-name)))
+    (when buf
+      (let ((win (get-buffer-window buf t)))
+        (when (window-live-p win)
+          (ignore-errors (delete-window win))))
+      (kill-buffer buf)))
+  (setq claude-collab--hud-current-source nil))
+
+(define-minor-mode claude-collab-hud-mode
+  "Buffer-local minor mode: show a persistent, non-modal HUD side-window.
+Opens `*claude-collab: hud*' at the bottom of the frame with live
+CLARIFY/annotation/session counts and the primary key hints. The
+HUD is display-only — cursor and evil keys stay in the source
+buffer. Refreshes are debounced via a 0.2s idle timer."
+  :lighter " cc-hud"
+  (if claude-collab-hud-mode
+      (progn
+        (cl-pushnew (current-buffer) claude-collab--hud-source-buffers)
+        (setq claude-collab--hud-current-source (current-buffer))
+        (add-hook 'after-change-functions
+                  #'claude-collab--hud-after-change nil t)
+        (add-hook 'kill-buffer-hook
+                  #'claude-collab--hud-kill-buffer-hook nil t)
+        (claude-collab--hud-install-global-hooks)
+        (claude-collab--hud-redraw))
+    (setq claude-collab--hud-source-buffers
+          (delq (current-buffer) claude-collab--hud-source-buffers))
+    (remove-hook 'after-change-functions
+                 #'claude-collab--hud-after-change t)
+    (remove-hook 'kill-buffer-hook
+                 #'claude-collab--hud-kill-buffer-hook t)
+    (if claude-collab--hud-source-buffers
+        ;; Other buffers still tracked — just repoint & redraw.
+        (progn
+          (setq claude-collab--hud-current-source
+                (car claude-collab--hud-source-buffers))
+          (claude-collab--hud-redraw))
+      (claude-collab--hud-teardown))))
+
+
+;;; Transient menu — unified entry point at SPC o c
+
+(require 'transient)
+
+(defun claude-collab--menu-headline ()
+  "Live status line for `claude-collab-menu'."
+  (let* ((counts (ignore-errors (claude-collab--clarify-counts)))
+         (inline (or (car counts) 0))
+         (heading (or (cdr counts) 0))
+         (total (+ inline heading))
+         (anns (ignore-errors
+                 (length (claude-collab--annotations-in-buffer (current-buffer)))))
+         (sid (claude-collab--current-session-id))
+         (edits (length (claude-collab-session-edits sid))))
+    (format "Claude Collab  —  %s\nCLARIFY: %d inline · %d heading · %d total     annotations: %d     session: %s (%d edits)"
+            (buffer-name)
+            inline heading total
+            (or anns 0)
+            sid edits)))
+
+(transient-define-prefix claude-collab-menu ()
+  "Claude collaboration commands. CLARIFY-centric review flow."
+  [:description claude-collab--menu-headline
+   ["CLARIFY"
+    ("n" "next"             claude-collab-next-clarify)
+    ("p" "prev"             claude-collab-prev-clarify)
+    ("a" "answer at point"  claude-collab-answer-clarify-at-point)
+    ("L" "list"             claude-collab-list-clarifys)
+    ("o" "→ Open questions" claude-collab-jump-to-open-questions)]
+   ["Annotations"
+    ("c" "add on region"    claude-collab-add-annotation)
+    ("l" "list"             claude-collab-list-annotations)
+    ("N" "next"             org-remark-next)
+    ("P" "prev"             org-remark-prev)
+    ("r" "remove at point"  org-remark-remove)]
+   ["Review"
+    ("A" "accept session"   claude-collab-accept-session)
+    ("u" "undo session"     claude-collab-undo-session)
+    ("U" "undo last edit"   claude-collab-undo-edit)
+    ("R" "pick session…"    claude-collab-pick-session)]
+   ["Display"
+    ("h" "toggle overlays"  claude-collab-toggle-overlays)
+    ("d" "diff popup mode"  claude-collab-diff-popup-mode)
+    ("D" "show full diff"   claude-collab-show-edit-diff-full)]])
+
+
 ;;; Spacemacs leader keys (SPC o c prefix)
+;;
+;; `SPC o c' is a *prefix* — which-key shows the third-key labels inline
+;; without activating a modal transient, so evil navigation in the
+;; source buffer keeps working while you pick a command. `SPC o c m'
+;; opens the full transient overview on demand (with live counts);
+;; `SPC o c H' toggles the persistent HUD side-window.
 
 (when (fboundp 'spacemacs/declare-prefix)
-  (spacemacs/declare-prefix "oc" "claude-collab")
+  (spacemacs/declare-prefix "oc" "claude-collab"))
+
+(when (fboundp 'spacemacs/set-leader-keys)
   (spacemacs/set-leader-keys
+    ;; Annotations
     "occ" #'claude-collab-add-annotation
-    "ocr" 'org-remark-remove
-    "ocn" 'org-remark-next
-    "ocp" 'org-remark-prev
     "ocl" #'claude-collab-list-annotations
+    "ocr" #'org-remark-remove
+    "ocN" #'org-remark-next
+    "ocP" #'org-remark-prev
+    ;; CLARIFY
+    "ocn" #'claude-collab-next-clarify
+    "ocp" #'claude-collab-prev-clarify
+    "oca" #'claude-collab-answer-clarify-at-point
+    "ocL" #'claude-collab-list-clarifys
+    "oco" #'claude-collab-jump-to-open-questions
+    ;; Review
+    "ocA" #'claude-collab-accept-session
     "ocu" #'claude-collab-undo-session
     "ocU" #'claude-collab-undo-edit
     "ocR" #'claude-collab-pick-session
-    "oca" #'claude-collab-accept-session
+    ;; Display
     "och" #'claude-collab-toggle-overlays
     "ocd" #'claude-collab-diff-popup-mode
-    "ocD" #'claude-collab-show-edit-diff-full))
+    "ocD" #'claude-collab-show-edit-diff-full
+    "ocm" #'claude-collab-menu
+    "ocH" #'claude-collab-hud-mode))
+
+;; Vim-style bracket motions in org-mode for CLARIFY navigation without
+;; popping the transient — keeps evil normal-mode flow unbroken during
+;; active review.
+(with-eval-after-load 'evil
+  (with-eval-after-load 'org
+    (evil-define-key 'normal org-mode-map
+      (kbd "] c") #'claude-collab-next-clarify
+      (kbd "[ c") #'claude-collab-prev-clarify)))
 
 (provide 'claude-collab)
 ;;; claude-collab.el ends here

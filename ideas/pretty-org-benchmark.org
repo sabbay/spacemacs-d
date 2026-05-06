@@ -1,0 +1,195 @@
+#+TITLE: Pretty Org Benchmark
+#+AUTHOR: Michal
+#+DATE: <2026-04-23 Thu>
+#+STARTUP: overview inlineimages
+#+OPTIONS: toc:2 num:t
+#+PROPERTY: header-args :eval never-export
+
+* Headings and Structure
+** Level 2 heading
+*** Level 3 heading
+**** Level 4 heading
+***** Level 5 heading
+****** Level 6 heading
+
+* TODO Keywords and Priorities
+** TODO [#A] High-priority task                                       :work:urgent:
+** NEXT [#B] Normal task                                              :project:
+** DONE [#C] Completed task                                           :archive:
+   CLOSED: [2026-04-20 Mon 14:32]
+** WAITING Waiting on external dep                                    :blocked:
+** CANCELLED Dropped this one                                         :abandoned:
+
+* Timestamps and Dates
+** Active timestamp: <2026-04-23 Thu>
+** Active with time: <2026-04-23 Thu 14:00>
+** Inactive: [2026-04-20 Mon]
+** Range: <2026-04-23 Thu>--<2026-04-30 Thu>
+** Scheduled/deadline
+   SCHEDULED: <2026-04-24 Fri 09:00>
+   DEADLINE: <2026-04-30 Thu>
+** Repeater: <2026-04-23 Thu +1w>
+
+* Tags
+** Single tag                                                         :tagone:
+** Multiple tags                                                      :alpha:beta:gamma:
+** Nested inheritance                                                 :parent:
+*** Inherits from parent                                              :child:
+
+* Lists
+** Unordered
+   - First item
+   - Second item
+     - Nested
+     - More nesting
+       - Deep
+   - Third item
+** Ordered
+   1. First
+   2. Second
+      1. Sub one
+      2. Sub two
+   3. Third
+** Description
+   - Emacs :: extensible editor
+   - Org mode :: note-taking + planning + literate programming
+   - PlantUML :: text-based diagrams
+** Checkboxes [4/4]
+   + [X] Install org-modern
+   + [X] Install org-superstar
+   + [X] Tune fonts
+   + [X] Decide on valign / org-appear
+
+* Tables
+| Name  | Role     | Years | Active |
+|-------+----------+-------+--------|
+| Alice | Backend  |     5 | yes    |
+| Bob   | Frontend |     3 | yes    |
+| Carol | Infra    |     8 | no     |
+| Dan   | Design   |     2 | yes    |
+#+TBLFM: @>$3=vsum(@I..@II)
+
+** Table with alignment
+| <l>         |  <c>   |   <r> |
+| Left        | Center | Right |
+|-------------+--------+-------|
+| foo         |  bar   |   baz |
+| hello world | middle |  1234 |
+
+* Source Blocks
+#+begin_src emacs-lisp
+(defun my/greet (name)
+  "Say hello to NAME."
+  (message "Hello, %s!" name))
+
+(my/greet "org-modern")
+#+end_src
+
+#+begin_src python :results output
+def fib(n):
+    a, b = 0, 1
+    for _ in range(n):
+        a, b = b, a + b
+    return a
+
+print([fib(i) for i in range(10)])
+#+end_src
+
+#+begin_src shell
+echo "benchmark run at $(date)"
+ls -la | head -5
+#+end_src
+
+* Other Blocks
+#+begin_quote
+The purpose of computing is insight, not numbers.
+-- Richard Hamming
+#+end_quote
+
+#+begin_example
+raw example text
+  preserves whitespace
+    and indentation
+#+end_example
+
+#+begin_verse
+Roses are red,
+  Violets are blue,
+Org mode is great,
+  And so are you.
+#+end_verse
+
+#+begin_center
+Centered block content
+#+end_center
+
+* Markup and Inline
+Basic emphasis: *bold*, /italic/, _underline_, =verbatim=, ~code~, +strike+.
+
+Inline code like ~(defun foo () 'bar)~ mixed into prose.
+
+Inline math: $E = mc^2$ and display math:
+
+\begin{equation}
+  \int_0^\infty e^{-x^2}\,dx = \frac{\sqrt{\pi}}{2}
+\end{equation}
+
+* Links
+- Web: [[https://github.com/minad/org-modern][org-modern on GitHub]]
+- File: [[file:~/.spacemacs.d/init.el::90][init.el line 90]]
+- Heading: [[*Tables][jump to Tables]]
+- Plain URL: https://orgmode.org
+
+* Footnotes
+Org is powerful[fn:1], and org-modern makes it pretty[fn:2].
+
+[fn:1] See the Org manual for the full grammar.
+[fn:2] See https://github.com/minad/org-modern.
+
+* Drawers and Properties
+:PROPERTIES:
+:ID:       benchmark-2026
+:CATEGORY: docs
+:END:
+
+** Entry with properties
+   :PROPERTIES:
+   :OWNER:    michal
+   :EFFORT:   1h
+   :CUSTOM_ID: bench-entry-1
+   :END:
+   :LOGBOOK:
+   - State "DONE"       from "TODO"       [2026-04-20 Mon 14:32]
+   - Note taken on [2026-04-18 Sat] \\
+     Reviewed with team.
+   :END:
+
+   Body text after the drawers.
+
+* Horizontal Rules and Special Markers
+
+-----
+
+#+name: my-data
+| key | value |
+|-----+-------|
+| a   |     1 |
+| b   |     2 |
+
+#+caption: A referenced source block
+#+name: my-code
+#+begin_src emacs-lisp :var data=my-data
+(length data)
+#+end_src
+
+#+RESULTS: my-code
+: 2
+
+* Agenda-visible sample
+** TODO Review quarterly plan                                         :work:
+   SCHEDULED: <2026-04-23 Thu>
+** TODO Pay rent                                                      :life:
+   DEADLINE: <2026-04-30 Thu>
+** TODO Dentist                                                       :health:
+   SCHEDULED: <2026-04-25 Sat 10:00>
+   

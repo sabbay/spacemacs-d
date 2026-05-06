@@ -1,0 +1,61 @@
+# Spacemacs.d — Emacs & Org development reference
+
+> This repo is a Spacemacs configuration layered with custom Emacs Lisp in `lisp/` (claude-collab, monday-docs-sync, etc). When modifying elisp here, the **authoritative references are the info manuals shipped with the installed Emacs build**, not web searches. They describe the exact API of the Emacs version actually running (GNU Emacs 30.2 via emacs-plus@30, Org 9.x).
+
+## How to read the canonical docs
+
+All manuals live under `/opt/homebrew/Cellar/emacs-plus@30/30.2/share/info/emacs/`. Dump any node to stdout with batch Emacs:
+
+```sh
+emacs -Q --batch --eval '(progn (require (quote info)) (info-initialize) (info "(elisp) Change Hooks") (princ (buffer-substring-no-properties (point-min) (point-max))))'
+```
+
+Swap `(elisp)` for `(org)`, `(emacs)`, `(eglot)`, etc. Use `Info-search` or `apropos` inside an interactive Emacs to find node names.
+
+Docstrings (often richer than the manual for individual symbols):
+
+```sh
+emacs -Q --batch --eval '(progn (require (quote org-element)) (princ (documentation (function org-element-cache-reset))))'
+```
+
+## Core manuals (local paths)
+
+- [Emacs Lisp Reference Manual](file:///opt/homebrew/Cellar/emacs-plus@30/30.2/share/info/emacs/elisp.info): the language. Buffers, text properties, overlays, change hooks, processes, regexp, faces, keymaps. Start here for any elisp question.
+- [Emacs User Manual](file:///opt/homebrew/Cellar/emacs-plus@30/30.2/share/info/emacs/emacs.info): user-level behavior and commands. Useful when a bug depends on what a user-facing command actually does.
+- [Org Mode Manual](file:///opt/homebrew/Cellar/emacs-plus@30/30.2/share/info/emacs/org.info): Org syntax, Babel, export, agenda, capture. The element parser's public API is documented under "Hacking".
+- [An Introduction to Emacs Lisp Programming](file:///opt/homebrew/Cellar/emacs-plus@30/30.2/share/info/emacs/eintr.info): readable tutorial. Useful for idioms.
+- [CL Package](file:///opt/homebrew/Cellar/emacs-plus@30/30.2/share/info/emacs/cl.info): `cl-lib` — destructuring, `cl-loop`, `cl-defstruct`, `cl-find-if`. Heavily used in `lisp/`.
+- [EIEIO Manual](file:///opt/homebrew/Cellar/emacs-plus@30/30.2/share/info/emacs/eieio.info): CLOS-style classes. Only relevant if touching object-oriented code.
+- [ERT Manual](file:///opt/homebrew/Cellar/emacs-plus@30/30.2/share/info/emacs/ert.info): the test framework used by `claude-collab-run-tests`.
+
+## Plumbing and tooling manuals
+
+- [Eglot](file:///opt/homebrew/Cellar/emacs-plus@30/30.2/share/info/emacs/eglot.info): LSP client.
+- [Flymake](file:///opt/homebrew/Cellar/emacs-plus@30/30.2/share/info/emacs/flymake.info): diagnostics.
+- [Transient](file:///opt/homebrew/Cellar/emacs-plus@30/30.2/share/info/emacs/transient.info): popup menus (Magit-style).
+- [use-package](file:///opt/homebrew/Cellar/emacs-plus@30/30.2/share/info/emacs/use-package.info): package declaration macro — Spacemacs layers wrap this.
+- [Tramp](file:///opt/homebrew/Cellar/emacs-plus@30/30.2/share/info/emacs/tramp.info): remote file access.
+
+## High-value nodes (pinned answers to recurring questions)
+
+- `(elisp) Change Hooks` — **before/after-change-functions, `inhibit-modification-hooks`, `combine-change-calls`.** Binding `inhibit-modification-hooks` across a *lasting* buffer edit is explicitly discouraged; it desyncs `org-element`'s cache and produces `(wrong-type-argument integer-or-marker-p nil)` on the next parse. Use `combine-change-calls` if batching is needed.
+- `(elisp) Modifying Buffers` — `insert`, `delete-region`, `replace-region-contents`.
+- `(elisp) Asynchronous Processes` — `make-process`, sentinels, stderr buffers.
+- `(elisp) Text Properties`, `(elisp) Overlays` — the difference matters: text properties are part of the buffer contents, overlays are not.
+- `(org) Hacking` — `org-element-parse-buffer`, `org-element-map`, `org-element-property`, `org-element-cache-reset`.
+- `(org) Working with Source Code` — Babel header arguments, `#+RESULTS:`, `org-babel-execute-src-block`.
+
+## External references (use only when local docs don't answer)
+
+- [Org Mode website](https://orgmode.org/): mirrors `org.info` as HTML; helpful for deep-linking.
+- [EmacsWiki](https://www.emacswiki.org/): community-edited; older and sometimes wrong — verify against the info manual before trusting.
+- [Worg](https://orgmode.org/worg/): contributed Org tutorials; same caveat.
+- [GNU Savannah — emacs.git](https://git.savannah.gnu.org/cgit/emacs.git): canonical source tree; use for reading C primitives (`src/*.c`) referenced from elisp.
+
+## Repo-local conventions
+
+- Elisp lives in `lisp/`. Each file is loaded from `init.el` / `dotspacemacs/user-config`.
+- Long-running work belongs in `make-process` sentinels, never `call-process`.
+- Any buffer-editing helper called from a sentinel must leave `org-element`'s cache consistent — either let change hooks run, or call `org-element-cache-reset` after the edit.
+- Tests use `ert`. Run with `M-x ert` or `claude-collab-run-tests`.
+- Display tweaks must read correctly in **both** solarized-light and solarized-dark; avoid baked-in colors or heavy boxes.

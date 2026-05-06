@@ -522,9 +522,13 @@ manage its dynamic padding+bg-color rendering."
 ;; Apply now and on every subsequent theme switch. APPEND=t so we run
 ;; *after* solarized's own `solarized--set-current' bookkeeper on each
 ;; theme enable, ensuring our overrides are the final word on chip faces.
+;; The hook MUST be registered after org-modern loads: it calls
+;; `set-face-attribute' on `org-modern-label' et al., which signals
+;; `(error "Invalid face" org-modern-label)' if the package isn't loaded —
+;; and that fires at startup before `org-modern' is pulled in.
 (with-eval-after-load 'org-modern
-  (my/org-faces-apply))
-(add-hook 'enable-theme-functions #'my/org-faces-apply t)
+  (my/org-faces-apply)
+  (add-hook 'enable-theme-functions #'my/org-faces-apply t))
 
 ;; Markdown: nice in-buffer previews via xwidget-webkit
 (with-eval-after-load 'markdown-mode
@@ -721,6 +725,22 @@ Navigates the shared xwidget-webkit session to FILE and wires
 ;; https://excalidraw.com) as the default app for .excalidraw files via
 ;; Finder → Get Info → Open With → Change All. The PWA's file_handlers
 ;; manifest auto-loads the file when launched.
+
+;; `find-file' (and dired, recentf, tab switching) doesn't consult macOS
+;; file associations — it just reads bytes and picks a mode from
+;; `auto-mode-alist', so .excalidraw files land in a JSON buffer. Hand
+;; them off to `open' and drop the buffer so the PWA takes over.
+(defun my/excalidraw-dispatch-on-visit ()
+  (when (and buffer-file-name
+             (string-suffix-p ".excalidraw" (downcase buffer-file-name)))
+    (let ((path buffer-file-name)
+          (buf (current-buffer)))
+      (call-process "open" nil 0 nil path)
+      (run-at-time 0 nil (lambda ()
+                           (when (buffer-live-p buf)
+                             (kill-buffer buf))))
+      (message "Opened %s in Excalidraw" (file-name-nondirectory path)))))
+(add-hook 'find-file-hook #'my/excalidraw-dispatch-on-visit)
 
 (with-eval-after-load 'org
   (when (fboundp 'spacemacs/set-leader-keys-for-major-mode)
@@ -928,6 +948,46 @@ Navigate          Stage/Commit       Remote            Branches & Logs    Forge 
 (spacemacs/declare-prefix "om" "monday-docs")
 (spacemacs/set-leader-keys "oms" #'monday-docs-sync
                            "oma" #'monday-docs-sync-abort)
+
+;; Override Spacemacs' default `SPC m e' (org-export-dispatch) with our
+;; pandoc+typst PDF builder. Same script `monday-docs-sync-pre-sync-command'
+;; uses, so the ad-hoc preview and the synced attachment are byte-identical.
+;; Async — Emacs stays responsive while pandoc + typst run; stderr lands in
+;; *org-build-pdf* on failure.
+(with-eval-after-load 'org
+  (when (fboundp 'spacemacs/set-leader-keys-for-major-mode)
+    (spacemacs/set-leader-keys-for-major-mode
+      'org-mode "e" #'my/org-build-pdf)))
+(defun my/org-build-pdf ()
+  "Run `bin/build-pdf.sh' on the current org file, then `open' the PDF."
+  (interactive)
+  (unless (and buffer-file-name
+               (string-suffix-p ".org" (downcase buffer-file-name)))
+    (user-error "Current buffer is not visiting an .org file"))
+  (when (buffer-modified-p) (save-buffer))
+  (let* ((org    (expand-file-name buffer-file-name))
+         (script (expand-file-name "~/.spacemacs.d/bin/build-pdf.sh"))
+         (pdf    (concat (file-name-sans-extension org) ".pdf"))
+         (out    (get-buffer-create "*org-build-pdf*")))
+    (with-current-buffer out
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (format "$ %s %s\n\n" script org))))
+    (message "build-pdf: running…")
+    (make-process
+     :name "org-build-pdf"
+     :buffer out
+     :command (list script org)
+     :sentinel
+     (lambda (proc _event)
+       (when (memq (process-status proc) '(exit signal))
+         (if (zerop (process-exit-status proc))
+             (progn
+               (message "build-pdf: wrote %s" pdf)
+               (call-process "open" nil 0 nil pdf))
+           (message "build-pdf: failed (exit %d) — see *org-build-pdf*"
+                    (process-exit-status proc))
+           (display-buffer out)))))))
 
 ;; claude-code-ide uses project.el's `project-current' to pick the working
 ;; directory, but Spacemacs uses Projectile — so it falls back to ~ for any

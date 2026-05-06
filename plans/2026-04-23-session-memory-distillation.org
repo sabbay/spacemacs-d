@@ -1,0 +1,229 @@
+#+TITLE: session-memory-distillation
+#+DATE: 2026-04-23
+#+STARTUP: showall inlineimages
+#+TODO: TODO CLARIFY(c) | DONE RESOLVED(r)
+
+* Goal
+  Turn every Claude Code session into *compounding knowledge*. Today, memory
+  is written only when I (Claude) think to save something or the user asks.
+  Most sessions end with no memory writes, so each new session re-discovers
+  the same preferences, re-encounters the same surprises, and re-establishes
+  project context through conversation.
+
+  This builds a post-session distillation pipeline: on session end, a
+  subagent reads the transcript, proposes structured memory entries as a
+  diff against the existing memory files, and the user accepts/rejects hunks
+  in an Emacs review buffer. Over weeks, memory accumulates with near-zero
+  manual authoring tax. The flywheel that makes every future session
+  smarter.
+
+* Approach
+  Keep the existing markdown-on-disk memory layout (`~/.claude/projects/
+  <project>/memory/*.md` indexed by `MEMORY.md`). The research pass over
+  Letta/MemGPT, Mem0, LangMem, Deep Agents, Cline, Cursor, Claude Code's own
+  auto-memory, and Goose converged on this shape — it's the de-facto standard
+  across production agents and already matches our setup.
+
+  The novel axes (vs. those systems) are two:
+
+  1. *User-in-the-loop via diff review.* All surveyed systems default to
+     automatic writes; only Cursor offers toast-level accept/reject. A
+     magit-style diff buffer in Emacs gives per-hunk accept/reject/edit with
+     zero extra infra — much richer than a toast, cheaper than a custom UI.
+  2. *Structured extraction with explicit op set* (INSERT/UPDATE/DELETE).
+     Mem0's April 2026 rewrite went ADD-only and punts dedup to retrieval
+     ranking; that doesn't work for flat-file injection where MEMORY.md is
+     loaded whole. We need the old two-phase reconciliation: extract
+     candidates, compare to existing, emit diff ops.
+
+  Everything else is borrowed. Deep Agents' explicit "when-to-write /
+  when-not-to-write" prompt is copy-reference-worthy; Letta's
+  core-block taxonomy maps onto our existing 4-type schema
+  (user/feedback/project/reference); Cline's session-boundary trigger
+  aligns with the Claude Code `Stop` hook. Storage stays markdown, retrieval
+  stays "load MEMORY.md at session start" — no vector DB, no background
+  reflection agent.
+
+  The risky part is extraction *quality*: transcripts are noisy, the
+  extractor will propose garbage sometimes. The diff-review step is the
+  safety net; poor proposals cost only the user's "reject all" keypress.
+
+* Architecture
+  #+begin_src plantuml :file session-memory-distillation-arch.png
+  @startuml
+  !theme plain
+  skinparam componentStyle rectangle
+  skinparam defaultFontSize 12
+
+  actor User
+  actor "Claude Code\n(session)" as Session
+
+  component "Transcript\n~/.claude/projects/.../\nsession-*.jsonl" as Transcript
+
+  component "Distillation\nSubagent" as Distiller
+  note right of Distiller : Reads transcript\n+ existing memory\n+ MemoryOp schema\nEmits {INSERT|UPDATE|DELETE}
+
+  component "Candidate\nProposal File\n_candidates.md" as Candidates
+  component "Emacs Diff\nReview Buffer" as Review
+  component "Memory Files\n*.md + MEMORY.md" as Memory
+
+  Session --> Transcript : writes jsonl
+  Session ..> Distiller : Stop hook fires
+  Transcript --> Distiller : read
+  Memory --> Distiller : read existing
+  Distiller --> Candidates : emit ops
+  Candidates ..> User : "N proposals pending"
+  User --> Review : /memory review
+  Review --> Memory : apply accepted hunks
+  Review --> Candidates : drop on completion
+
+  component "Consolidation\nPass (weekly)" as Consolidate
+  Memory --> Consolidate : full read
+  Consolidate --> Memory : dedup / merge / decay
+  @enduml
+  #+end_src
+
+* Steps
+  1. [ ] Define the extraction schema and prompt
+     :PROPERTIES:
+     :files:  skills/memory-distill/SKILL.md, skills/memory-distill/extraction-prompt.md, skills/memory-distill/schema.json
+     :tests:  (prose spec; no executable test — :verify: is the manual check below)
+     :verify: Feed the prompt + a synthetic transcript with 1 feedback + 1 project fact + 1 noise item into `claude --print`; output is valid JSON matching schema; noise item is NOT in output.
+     :END:
+     The highest-leverage artifact. Copy the explicit "when-to-write / when-
+     not-to-write" rules from Deep Agents' memory middleware, adapted to our
+     4-type taxonomy (user/feedback/project/reference). Schema:
+     ~{ op: INSERT|UPDATE|DELETE, type, name, description, body, rationale,
+     target_file?, existing_entry_id? }~. The rationale field is what the
+     diff buffer surfaces to the user — "why is this worth saving".
+
+  2. [ ] Build the distillation subagent invocation
+     :PROPERTIES:
+     :files:  bin/distill-session, skills/memory-distill/SKILL.md
+     :tests:  bin/distill-session-test.sh
+     :verify: `bin/distill-session <session-jsonl>` on a sample transcript produces `_candidates.md` with ≥1 well-formed proposal; invalid transcripts exit non-zero with a clear error.
+     :END:
+     A shell script that: reads the session jsonl, extracts assistant/user
+     turns (drops tool-results and tool-use metadata to save tokens), loads
+     existing MEMORY.md + indexed files as "existing memories" context,
+     invokes Claude via `claude --print` with the extraction prompt and the
+     structured-output schema, writes `_candidates.md` to the project's
+     memory directory. Gate on "substantive session" — skip if transcript
+     has <N tool calls or <M user turns (avoids distilling chitchat).
+
+  3. [ ] Wire the Stop hook
+     :PROPERTIES:
+     :files:  ~/.claude/settings.json
+     :tests:  (config change; verify by running a short session and checking _candidates.md appears)
+     :verify: After a 5-turn session with substantive content, `_candidates.md` exists in the project's memory directory; after a 1-turn "hi" session, it does not.
+     :END:
+     Add a `Stop` hook in Claude Code settings that invokes
+     `bin/distill-session` with the session id + transcript path. Hook runs
+     out-of-band so it doesn't block Claude's shutdown. Error in the hook
+     must not break future sessions — log, swallow, move on.
+
+  4. [ ] Emacs review buffer — the diff UX
+     :PROPERTIES:
+     :files:  lisp/claude-memory.el, lisp/user-config.el (leader binding)
+     :tests:  lisp/claude-memory-test.el
+     :verify: With a fabricated `_candidates.md` containing 3 ops (1 INSERT, 1 UPDATE, 1 DELETE), `SPC o m r` opens a review buffer; `y`/`n`/`e` on each hunk accept/reject/edit; `C-c C-c` commits accepted hunks to memory files and clears `_candidates.md`; `C-c C-k` aborts without changes.
+     :END:
+     The crux of the user-in-the-loop differentiator. Review buffer shows
+     each proposed op as a diff hunk with rationale header. Key bindings:
+     `y` accept, `n` reject, `e` edit body inline, `RET` expand detail,
+     `TAB` toggle all, `C-c C-c` commit, `C-c C-k` abort. On commit,
+     accepted INSERTs create new memory files, UPDATEs patch existing ones,
+     DELETEs remove entries. MEMORY.md index is updated atomically.
+
+  5. [ ] HUD integration + pending-review signal
+     :PROPERTIES:
+     :files:  lisp/claude-collab.el (HUD section), lisp/claude-memory.el
+     :tests:  lisp/claude-memory-test.el
+     :verify: When `_candidates.md` contains ≥1 pending proposal, the claude-collab HUD shows "Memory: N pending"; clicking/RET on that line runs `/memory review`.
+     :END:
+     The distillation is silent — the user needs a nudge. Add a line to the
+     existing `claude-collab-hud-mode` status block. Also mention in the
+     session-start banner ("N memory candidates pending from previous
+     sessions"). Both are low-friction; ignoring them costs nothing.
+
+** CLARIFY Step 6: Consolidation cadence
+   :PROPERTIES:
+   :files:  <TBD — depends on resolution of Open questions>
+   :tests:  <TBD — depends on trigger choice>
+   :verify: Decision captured in Approach; matching Open questions bullets ticked.
+   :END:
+   Blocked on: should consolidation (dedup, merge, decay) run automatically
+   (weekly cron / idle-timer), on demand only (~/memory consolidate~), or
+   both?
+
+** CLARIFY Step 7: Storage schema evolution
+   :PROPERTIES:
+   :files:  <TBD — depends on schema decision>
+   :tests:  <TBD — depends on schema decision>
+   :verify: Chosen schema documented in Approach; if migrating, migration step added.
+   :END:
+   Blocked on: keep current 4-type free-form taxonomy, or adopt Cline's
+   prescribed six-file Memory Bank schema (projectbrief / productContext /
+   activeContext / systemPatterns / techContext / progress)?
+
+  8. [ ] Feedback loop: reject signal tuning
+     :PROPERTIES:
+     :files:  bin/distill-session, skills/memory-distill/extraction-prompt.md
+     :tests:  manual review after N sessions
+     :verify: After 10 real sessions, acceptance rate ≥ 60%; rejected proposals' reasons (grep `# rejected:` comments in _candidates.md) surface a recurring pattern to tighten the prompt.
+     :END:
+     Ship with a high-recall extractor (propose many, accept few) and track
+     rejection reasons in a local log. After 10+ sessions, analyze the
+     log, tighten the prompt. This is the *how we avoid noise* mechanism.
+     Start loose — it's easier to tighten later than to discover what the
+     user wants to keep.
+
+* Risks
+  - *Hallucinated memories* — extractor invents "user prefers X" from a
+    single offhand phrase. Mitigation: diff review (user sees every proposal
+    before commit); rationale field surfaces the evidence; rejection-reason
+    log feeds back into prompt tuning.
+  - *Extraction cost* — ~5¢ per session adds up. Mitigation: gate on
+    "substantive session" heuristic in Step 2; use Sonnet (not Opus) for
+    extraction — same schema comprehension at 1/5 the price.
+  - *Stale/conflicting memories* — new memory contradicts existing; auto-
+    UPDATE could erase valid context. Mitigation: UPDATE ops include the old
+    value in the diff hunk; user sees both; manual consolidation pass
+    catches slow drift.
+  - *Review buffer fatigue* — user ignores the pending signal, proposals
+    pile up forever. Mitigation: cap at 50 pending; beyond that, oldest
+    auto-drop with a banner warning. Also track "time since last review" in
+    the HUD; red after 7 days.
+  - *Hook fragility* — Stop-hook shell script fails silently in 5% of
+    sessions. Mitigation: error-log to `~/.cache/claude-memory/errors.log`;
+    weekly consolidation pass surfaces the log if non-empty.
+  - *Schema drift between write and read* — bug pattern observed in
+    LangMem. Mitigation: single schema.json file referenced by both the
+    distiller and the Emacs review code; validate on both ends.
+
+* Open questions
+  - [ ] [[*CLARIFY Step 6: Consolidation cadence][Step 6]]: consolidation trigger — automatic (idle timer / weekly
+    cron), on-demand (~/memory consolidate~), or both?
+  - [ ] [[*CLARIFY Step 7: Storage schema evolution][Step 7]]: schema choice — keep 4-type free-form (user / feedback /
+    project / reference), adopt Cline Memory Bank's six prescribed files,
+    or hybrid (4-type by default + one "activeContext" sibling file)?
+  - [ ] Extraction model — Sonnet 4.6 (default), Haiku 4.5 (cheap),
+    Opus 4.7 (quality for ambiguous transcripts)? Flat choice vs.
+    per-session adaptive?
+  - [ ] Transcript scope per distill call — per `claude code` invocation
+    (natural hook boundary), per calendar day (rollup), or per "thread"
+    across resumed sessions? The three produce different memory
+    granularities.
+  - [ ] Project-scoping — distill to
+    `~/.claude/projects/<project>/memory/` always, or split
+    project-specific vs. cross-project memories (e.g., user preferences
+    promoted to `~/.claude/memory/`)?
+  - [ ] Interaction with existing auto-memory Claude Code ships — does
+    this replace, augment, or coexist with the first-party auto-memory?
+    Running both risks dual-write drift.
+  - [ ] Rejection-reason capture — free-text comment on reject (richer
+    feedback signal) vs. one-keystroke reject (faster). Both is messy.
+  - [ ] Access to prior transcripts for consolidation — does the weekly
+    pass re-read all transcripts or just the memory files themselves?
+    Re-reading transcripts surfaces context the distiller missed but
+    balloons cost.
