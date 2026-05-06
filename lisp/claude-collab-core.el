@@ -99,6 +99,200 @@ result over the wire or to a log goes through this function."
     (prin1-to-string sexp)))
 
 
+;;; Content-addressed anchors
+;;
+;; The annotation system today identifies a highlighted region by its
+;; byte position in the source buffer (`:org-remark-beg' /
+;; `:org-remark-end' in marginalia.org). Byte positions drift the
+;; moment any edit lands earlier in the buffer — that's the structural
+;; cause of the /design revise drift incident, where multiple
+;; `apply-annotation' calls in sequence saw the second/third edit land
+;; inside `:verify:' lines instead of the CLARIFY blocks they were
+;; anchored to.
+;;
+;; Idiom borrowed from `bookmark.el' (`front-context-string' /
+;; `rear-context-string' — battle-tested 30 years): an anchor is
+;; identified by its text + the N characters immediately before and
+;; after. Locating an anchor in a fresh source string is then a string
+;; search, not a position lookup. Byte positions are derived state,
+;; recomputed each time we want to apply an edit.
+;;
+;; The algorithm here is strict-match: text exact + context exact.
+;; Fuzzy fallback (Levenshtein-scored candidates) is intentionally
+;; deferred — strict matching catches the drift class structurally,
+;; and "the source no longer contains exactly this text in exactly
+;; this surrounding" is a clean diagnostic that an agent can act on.
+
+(cl-defstruct (claude-collab-core-anchor
+               (:constructor claude-collab-core-anchor-create)
+               (:copier nil))
+  "Content-addressed handle on a region within a source document.
+
+Slots:
+- TEXT             the highlighted span (string)
+- CONTEXT-BEFORE   N characters immediately before TEXT in the
+                   source-at-marking-time (string, may be empty when
+                   the anchor sits at the start of the document)
+- CONTEXT-AFTER    N characters immediately after TEXT (string, may be
+                   empty at end of document)
+- OCCURRENCE       1-based ordinal for non-unique TEXTs; the strict
+                   match algorithm doesn't use this today, but it is
+                   reserved for the fallback path (`text+occurrence'
+                   with no context, used when context is unavailable)"
+  text
+  (context-before "")
+  (context-after "")
+  (occurrence 1))
+
+(cl-defstruct (claude-collab-core-region
+               (:constructor claude-collab-core-region-create)
+               (:copier nil))
+  "Half-open buffer-position pair, derived state.
+
+Slots:
+- BEGIN  inclusive 0-indexed byte offset into the source string
+- END    exclusive offset (so END - BEGIN == length of the region)
+
+These are *not* identity. They are produced by `locate-anchor' from
+the current source and the (stable) anchor; they should be recomputed
+on every edit boundary, never cached past a buffer mutation."
+  begin end)
+
+
+;;; Anchor location
+
+(defun claude-collab-core--find-all-occurrences (source text)
+  "Return a list of 0-indexed positions where TEXT begins in SOURCE.
+Empty TEXT yields nil — we don't index zero-length needles."
+  (when (and (stringp source) (stringp text) (not (string-empty-p text)))
+    (let ((positions nil)
+          (pos 0)
+          found)
+      (while (setq found (string-search text source pos))
+        (push found positions)
+        (setq pos (1+ found)))
+      (nreverse positions))))
+
+(defun claude-collab-core--context-matches-p
+    (source position text-len context-before context-after)
+  "Non-nil if SOURCE has CONTEXT-BEFORE immediately before POSITION and
+CONTEXT-AFTER immediately after POSITION+TEXT-LEN. Empty context strings
+are treated as wildcards (always match)."
+  (let ((cb-len (length context-before))
+        (ca-len (length context-after))
+        (src-len (length source)))
+    (and
+     ;; Context-before matches, or is empty.
+     (or (zerop cb-len)
+         (and (>= position cb-len)
+              (string= (substring source (- position cb-len) position)
+                       context-before)))
+     ;; Context-after matches, or is empty.
+     (or (zerop ca-len)
+         (let ((after-start (+ position text-len))
+               (after-end (+ position text-len ca-len)))
+           (and (<= after-end src-len)
+                (string= (substring source after-start after-end)
+                         context-after)))))))
+
+(defun claude-collab-core-locate-anchor (source anchor)
+  "Locate ANCHOR within SOURCE.
+
+Returns one of:
+
+  (:ok REGION)
+    Single match: TEXT occurs in SOURCE and the surrounding context
+    (or absence of context if both context strings are empty) matches.
+
+  (:error :not-found POSITIONS)
+    TEXT does not occur in SOURCE at all. POSITIONS is nil.
+
+  (:error :ambiguous REGIONS)
+    TEXT occurs more than once after applying the context filter; the
+    anchor cannot be uniquely resolved. REGIONS lists every plain-text
+    occurrence so callers can present alternatives.
+
+When ANCHOR has empty CONTEXT-BEFORE *and* empty CONTEXT-AFTER, the
+disambiguation step is a no-op — multiple text matches will always
+return `:ambiguous'. Populating context is the caller's job at marking
+time."
+  (let* ((text (claude-collab-core-anchor-text anchor))
+         (ctx-before (or (claude-collab-core-anchor-context-before anchor) ""))
+         (ctx-after (or (claude-collab-core-anchor-context-after anchor) ""))
+         (text-len (length text))
+         (occurrences (claude-collab-core--find-all-occurrences source text))
+         (filtered
+          (cl-remove-if-not
+           (lambda (pos)
+             (claude-collab-core--context-matches-p
+              source pos text-len ctx-before ctx-after))
+           occurrences)))
+    (cond
+     ((null occurrences)
+      (list :error :not-found nil))
+     ((= 1 (length filtered))
+      (list :ok
+            (claude-collab-core-region-create
+             :begin (car filtered)
+             :end (+ (car filtered) text-len))))
+     (t
+      (list :error :ambiguous
+            (mapcar (lambda (pos)
+                      (claude-collab-core-region-create
+                       :begin pos
+                       :end (+ pos text-len)))
+                    occurrences))))))
+
+
+;;; Drift detection (precondition for safe apply)
+
+(defun claude-collab-core-detect-drift (source anchor)
+  "Return :clean if ANCHOR resolves to a unique region in SOURCE,
+otherwise return (:drifted :reason KIND :diagnosis PLIST).
+
+KIND is one of:
+- :not-found     the anchor's text doesn't appear in SOURCE
+- :ambiguous     the anchor's text appears more than once and context
+                 (if any) doesn't disambiguate
+
+This is the canonical guard. Adapter code should call this *before*
+mutating; if it returns `:drifted', the buffer state has changed since
+the annotation was created and applying an edit on stored byte
+positions would corrupt the file (the original drift bug)."
+  (pcase (claude-collab-core-locate-anchor source anchor)
+    (`(:ok ,_) :clean)
+    (`(:error :not-found ,_)
+     (list :drifted :reason :not-found :diagnosis nil))
+    (`(:error :ambiguous ,candidates)
+     (list :drifted
+           :reason :ambiguous
+           :diagnosis (list :candidates candidates)))))
+
+
+;;; Marginalia bridge
+
+(defun claude-collab-core-anchor-from-marginalia (plist)
+  "Build a `claude-collab-core-anchor' from a marginalia annotation PLIST.
+
+PLIST is the shape returned by `claude-collab--annotations-in-buffer':
+   (:id ID :file F :begin B :end E :text T :label L)
+
+Only the `:text' field is required (it becomes the anchor's text).
+Optional `:context-before' and `:context-after' keys, if present, are
+copied through; otherwise the anchor gets empty-string context (text-
+only matching, with `:ambiguous' returned if the text isn't unique).
+
+Marginalia today does not store context — adapter code is expected to
+either populate context at annotation creation time (richer marginalia
+schema, future commit) or accept text-only matching for legacy
+annotations."
+  (claude-collab-core-anchor-create
+   :text           (or (plist-get plist :text) "")
+   :context-before (or (plist-get plist :context-before) "")
+   :context-after  (or (plist-get plist :context-after) "")
+   :occurrence     (or (plist-get plist :occurrence) 1)))
+
+
 (provide 'claude-collab-core)
 
 ;;; claude-collab-core.el ends here

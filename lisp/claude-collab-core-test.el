@@ -94,4 +94,154 @@
          (parsed (read printed)))
     (should (equal data parsed))))
 
+;;; --- anchor location ---
+
+(defun claude-collab-core-test--anchor (text &optional before after)
+  "Helper: build a cc-anchor with optional context."
+  (claude-collab-core-anchor-create
+   :text text
+   :context-before (or before "")
+   :context-after  (or after "")))
+
+(ert-deftest claude-collab-core-test-locate-anchor-unique-match ()
+  "A text that appears once resolves to a single region."
+  (let* ((source "Hello, world! Goodbye.")
+         (anchor (claude-collab-core-test--anchor "world"))
+         (result (claude-collab-core-locate-anchor source anchor)))
+    (should (eq :ok (car result)))
+    (let ((region (cadr result)))
+      (should (= 7 (claude-collab-core-region-begin region)))
+      (should (= 12 (claude-collab-core-region-end region))))))
+
+(ert-deftest claude-collab-core-test-locate-anchor-not-found ()
+  "Missing text returns :error :not-found with no candidates."
+  (let* ((source "Hello, world!")
+         (anchor (claude-collab-core-test--anchor "absent"))
+         (result (claude-collab-core-locate-anchor source anchor)))
+    (should (equal '(:error :not-found nil) result))))
+
+(ert-deftest claude-collab-core-test-locate-anchor-ambiguous-no-context ()
+  "Multiple text matches with no context return :error :ambiguous
+listing every occurrence."
+  (let* ((source "abc abc abc")
+         (anchor (claude-collab-core-test--anchor "abc"))
+         (result (claude-collab-core-locate-anchor source anchor)))
+    (should (eq :error (car result)))
+    (should (eq :ambiguous (cadr result)))
+    (should (= 3 (length (caddr result))))
+    (should (equal '(0 4 8)
+                   (mapcar #'claude-collab-core-region-begin (caddr result))))))
+
+(ert-deftest claude-collab-core-test-locate-anchor-context-disambiguates ()
+  "Two text occurrences, only one with matching context = unique resolution.
+This is the load-bearing case — the original drift bug existed because
+no equivalent disambiguation existed."
+  (let* ((source "left abc right; left abc wrong")
+         (anchor (claude-collab-core-test--anchor "abc" "left " " right"))
+         (result (claude-collab-core-locate-anchor source anchor)))
+    (should (eq :ok (car result)))
+    (should (= 5 (claude-collab-core-region-begin (cadr result))))))
+
+(ert-deftest claude-collab-core-test-locate-anchor-at-bof ()
+  "Anchor at the start of the source — empty context-before is fine."
+  (let* ((source "FIRST then second")
+         (anchor (claude-collab-core-test--anchor "FIRST" "" " then"))
+         (result (claude-collab-core-locate-anchor source anchor)))
+    (should (eq :ok (car result)))
+    (should (= 0 (claude-collab-core-region-begin (cadr result))))))
+
+(ert-deftest claude-collab-core-test-locate-anchor-at-eof ()
+  "Anchor at the very end — empty context-after is fine."
+  (let* ((source "alpha beta GAMMA")
+         (anchor (claude-collab-core-test--anchor "GAMMA" "beta " ""))
+         (result (claude-collab-core-locate-anchor source anchor)))
+    (should (eq :ok (car result)))
+    (should (= 11 (claude-collab-core-region-begin (cadr result))))))
+
+(ert-deftest claude-collab-core-test-locate-anchor-multiline-text ()
+  "Anchor whose text spans newlines locates correctly."
+  (let* ((source "line one\nline two\nline three")
+         (anchor (claude-collab-core-test--anchor "one\nline" "line " " two"))
+         (result (claude-collab-core-locate-anchor source anchor)))
+    (should (eq :ok (car result)))
+    (should (= 5 (claude-collab-core-region-begin (cadr result))))))
+
+(ert-deftest claude-collab-core-test-locate-anchor-context-shifted ()
+  "When context doesn't match anywhere, ambiguous text falls through
+to the ambiguous error (still reports all text occurrences for triage)."
+  (let* ((source "left abc one; left abc two")
+         (anchor (claude-collab-core-test--anchor "abc" "WRONG-CTX " " right"))
+         (result (claude-collab-core-locate-anchor source anchor)))
+    ;; Both occurrences fail the context filter, so the filtered list is
+    ;; empty — still classified ambiguous since multiple text occurrences
+    ;; exist (the agent should see the candidates list to pick one).
+    (should (eq :error (car result)))
+    (should (eq :ambiguous (cadr result)))))
+
+(ert-deftest claude-collab-core-test-locate-anchor-empty-source ()
+  "Empty source string = not found."
+  (let* ((source "")
+         (anchor (claude-collab-core-test--anchor "x"))
+         (result (claude-collab-core-locate-anchor source anchor)))
+    (should (equal '(:error :not-found nil) result))))
+
+
+;;; --- drift detection ---
+
+(ert-deftest claude-collab-core-test-detect-drift-clean ()
+  "Anchor located uniquely → :clean."
+  (let* ((source "the quick brown fox")
+         (anchor (claude-collab-core-test--anchor "brown")))
+    (should (eq :clean (claude-collab-core-detect-drift source anchor)))))
+
+(ert-deftest claude-collab-core-test-detect-drift-not-found ()
+  "Anchor's text deleted → :drifted :reason :not-found."
+  (let* ((source "the quick brown fox")
+         (anchor (claude-collab-core-test--anchor "missing"))
+         (result (claude-collab-core-detect-drift source anchor)))
+    (should (eq :drifted (car result)))
+    (should (eq :not-found (plist-get (cdr result) :reason)))))
+
+(ert-deftest claude-collab-core-test-detect-drift-ambiguous ()
+  "Anchor's text duplicated and no context → :drifted :reason :ambiguous,
+with candidates included in :diagnosis."
+  (let* ((source "go go go")
+         (anchor (claude-collab-core-test--anchor "go"))
+         (result (claude-collab-core-detect-drift source anchor)))
+    (should (eq :drifted (car result)))
+    (should (eq :ambiguous (plist-get (cdr result) :reason)))
+    (let ((candidates (plist-get (plist-get (cdr result) :diagnosis) :candidates)))
+      (should (= 3 (length candidates))))))
+
+
+;;; --- marginalia bridge ---
+
+(ert-deftest claude-collab-core-test-anchor-from-marginalia-text-only ()
+  "Marginalia plist with only :text yields anchor with empty context."
+  (let* ((plist '(:id "abc" :text "hello world" :begin 7 :end 18))
+         (anchor (claude-collab-core-anchor-from-marginalia plist)))
+    (should (equal "hello world" (claude-collab-core-anchor-text anchor)))
+    (should (equal "" (claude-collab-core-anchor-context-before anchor)))
+    (should (equal "" (claude-collab-core-anchor-context-after anchor)))))
+
+(ert-deftest claude-collab-core-test-anchor-from-marginalia-with-context ()
+  "Optional :context-before / :context-after are picked up when present."
+  (let* ((plist '(:text "x" :context-before "AAA" :context-after "BBB"))
+         (anchor (claude-collab-core-anchor-from-marginalia plist)))
+    (should (equal "AAA" (claude-collab-core-anchor-context-before anchor)))
+    (should (equal "BBB" (claude-collab-core-anchor-context-after anchor)))))
+
+(ert-deftest claude-collab-core-test-anchor-from-marginalia-roundtrip ()
+  "Anchor → plist → anchor is structurally equivalent (text + context)."
+  (let* ((original (claude-collab-core-anchor-create
+                    :text "v" :context-before "L" :context-after "R"))
+         (plist (list :text (claude-collab-core-anchor-text original)
+                      :context-before (claude-collab-core-anchor-context-before original)
+                      :context-after (claude-collab-core-anchor-context-after original)))
+         (round (claude-collab-core-anchor-from-marginalia plist)))
+    (should (equal (claude-collab-core-anchor-text original)
+                   (claude-collab-core-anchor-text round)))
+    (should (equal (claude-collab-core-anchor-context-before original)
+                   (claude-collab-core-anchor-context-before round)))))
+
 ;;; claude-collab-core-test.el ends here
