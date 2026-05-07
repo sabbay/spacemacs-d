@@ -1568,6 +1568,86 @@ from --bounds-for-unit must be caught and surfaced as :error, not bubble."
       (should (string-match-p "not allowed" (plist-get result :error))))))
 
 
+;;; --- Fix 1: encode-prop-value respects print-length/level ---
+
+(ert-deftest claude-collab-test-encode-prop-value-survives-print-length-10 ()
+  "encode-prop-value must not truncate strings even when print-length=10."
+  (let* ((long-str "abcdefghijklmnopqrstuvwxyz0123")
+         (print-length 10)
+         (print-level 10)
+         (encoded (claude-collab--encode-prop-value long-str))
+         (decoded (claude-collab--decode-prop-value encoded)))
+    (should (string= long-str decoded))))
+
+;;; --- Fix 2: unresolve-annotation aborts when buffer shrunk ---
+
+(ert-deftest claude-collab-test-unresolve-aborts-when-buffer-shrunk ()
+  "revert-session signals conflict when buffer shorter than recorded end."
+  (skip-unless (fboundp 'org-remark-highlight-mark))
+  (claude-collab-test--reset-state)
+  (claude-collab-test--with-temp-file buf _file
+    (with-current-buffer buf
+      (org-remark-highlight-mark 7 12 nil nil "x")
+      (save-buffer))
+    (let* ((id (plist-get (car (claude-collab--annotations-in-buffer buf)) :id))
+           (_resolve (claude-collab-resolve-annotation-by-id id))
+           (sid (claude-collab--current-session-id)))
+      ;; Shrink the buffer so end is past point-max.
+      (with-current-buffer buf
+        (let ((inhibit-modification-hooks t))
+          (delete-region 8 (point-max))
+          (save-buffer)))
+      (let ((result (claude-collab--revert-session sid)))
+        (should (plist-get result :conflict))
+        (should (= 0 (plist-get result :reverted)))))))
+
+;;; --- Fix 3: create-highlight emits a telemetry event ---
+
+(ert-deftest claude-collab-test-create-highlight-emits-creation-event ()
+  "create-highlight appends one JSONL line with tool=create-highlight."
+  (skip-unless (fboundp 'org-remark-highlight-mark))
+  (let* ((tmp (make-temp-file "cc-ch-log-" nil ".jsonl"))
+         (claude-collab-mcp-log-file tmp))
+    (unwind-protect
+        (claude-collab-test--with-temp-file buf file
+          (claude-collab-clear-log)
+          (claude-collab--create-highlight file 7 12 "probe-label")
+          (let ((content (with-temp-buffer
+                           (insert-file-contents tmp)
+                           (buffer-string))))
+            (should (string-match-p "\"tool\":\"create-highlight\"" content))
+            (should (string-match-p "probe-label" content))
+            ;; args are stored as prin1 plist, not JSON keys
+            (should (string-match-p ":begin" content))
+            (should (string-match-p ":end" content))
+            (should (string-suffix-p "\n" content))))
+      (when (file-exists-p tmp) (delete-file tmp)))))
+
+;;; --- Fix 4: already-resolved telemetry is format-proof ---
+
+(ert-deftest claude-collab-test-mcp-log-already-resolved-format-proof ()
+  "JSONL line for already-resolved must parse and carry already-resolved field."
+  (let* ((tmp (make-temp-file "cc-log-fmt-" nil ".jsonl"))
+         (claude-collab-mcp-log-file tmp))
+    (unwind-protect
+        (progn
+          (claude-collab-clear-log)
+          (claude-collab-resolve-annotation-by-id "ghost-id-fmt-test")
+          (let* ((content (with-temp-buffer
+                            (insert-file-contents tmp)
+                            (buffer-string)))
+                 (line (car (split-string (string-trim content) "\n")))
+                 (obj (json-parse-string line :object-type 'alist
+                                              :false-object nil
+                                              :null-object nil))
+                 (result-str (alist-get 'result obj))
+                 ;; result field is a prin1 string; check it carries :already-resolved
+                 )
+            (should (stringp result-str))
+            (should (string-match-p ":already-resolved" result-str))
+            (should (string-match-p "ghost-id-fmt-test" result-str))))
+      (when (file-exists-p tmp) (delete-file tmp)))))
+
 ;;; --- entry point ---
 
 (defun claude-collab-run-tests ()

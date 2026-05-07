@@ -453,7 +453,9 @@ Org's property-drawer syntax doesn't allow newlines or unescaped
 quote chars in values — `prin1-to-string' produces a quoted, escaped
 literal that round-trips through `read'. Required for context-before
 / context-after which routinely contain the source's newlines."
-  (let ((print-escape-newlines t)
+  (let ((print-length nil)
+        (print-level nil)
+        (print-escape-newlines t)
         (print-escape-control-characters t))
     (prin1-to-string s)))
 
@@ -620,7 +622,12 @@ marginalia entry's drawer."
   (when (fboundp 'org-remark-highlight-mark)
     (with-current-buffer (find-file-noselect file)
       (save-excursion
-        (org-remark-highlight-mark beg end nil nil label nil anchor-props)))))
+        (org-remark-highlight-mark beg end nil nil label nil anchor-props)))
+    (claude-collab--mcp-log-entry
+     "create-highlight"
+     (list :file file :begin beg :end end :label label)
+     (list :ok t)
+     0 nil)))
 
 (defun claude-collab-resolve-annotation-by-id (id)
   "Remove annotation ID and log a session-scoped record for undo-coupling.
@@ -702,13 +709,27 @@ last place that still re-marked at stored byte positions blindly."
                      (claude-collab--encode-prop-value (or ctx-after  ""))))))
     (when (and file (file-exists-p file))
       (with-current-buffer (find-file-noselect file)
-        (when (and (stringp recorded-text)
-                   (<= end (point-max)))
-          (let ((current (buffer-substring-no-properties beg end)))
-            (unless (string= current recorded-text)
-              (signal 'claude-collab-conflict
-                      (list (format "unresolve drift at %s:%d — region changed since resolve"
-                                    (file-name-nondirectory file) beg)))))))
+        (when (stringp recorded-text)
+          ;; Buffer shrunk case must signal too — don't silently skip.
+          (when (> end (point-max))
+            (signal 'claude-collab-conflict
+                    (list (format "unresolve drift at %s:%d — buffer shorter than recorded end"
+                                  (file-name-nondirectory file) beg))))
+          ;; Only run detect-drift when there's non-empty text to anchor on.
+          ;; Empty recorded-text means the overlay collapsed at resolve time
+          ;; (zero-width); no useful drift check is possible — skip.
+          (when (not (string-empty-p recorded-text))
+            (let* ((source (buffer-substring-no-properties (point-min) (point-max)))
+                   (anchor (claude-collab-core-anchor-create
+                            :text recorded-text
+                            :context-before (or ctx-before "")
+                            :context-after  (or ctx-after  "")))
+                   (drift (claude-collab-core-detect-drift source anchor)))
+              (unless (eq drift :clean)
+                (signal 'claude-collab-conflict
+                        (list (format "unresolve drift at %s:%d — %s"
+                                      (file-name-nondirectory file) beg
+                                      (plist-get (cdr drift) :reason)))))))))
       (claude-collab--create-highlight file beg end label anchor-props))))
 
 
