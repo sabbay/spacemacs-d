@@ -33,6 +33,16 @@
 (with-eval-after-load 'lsp-ui
   (define-key evil-normal-state-map (kbd "K") #'lsp-ui-doc-glance))
 
+;; Run gopls directly per Emacs session. The upstream default uses
+;; `-remote=auto' (shared daemon via a Unix socket), which is useful on
+;; multi-client machines but leaves a daemon alive across Emacs
+;; restarts — if a session dies mid-handshake the zombie daemon
+;; happily re-attaches and the next session hangs at `:starting'.
+(setq lsp-go-gopls-server-args nil)
+
+(with-eval-after-load 'projectile
+  (add-to-list 'projectile-ignored-projects (expand-file-name "~/")))
+
 ;; Show 3 lines of context in rg-based searches
 (setq helm-grep-ag-command "rg --color=always --smart-case --no-heading --line-number -C 3 %s %s %s")
 
