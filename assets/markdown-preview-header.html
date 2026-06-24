@@ -102,7 +102,7 @@
     wireZoomable();
   }
   function wireZoomable() {
-    var targets = document.querySelectorAll('div.mermaid svg, img');
+    var targets = document.querySelectorAll('div.mermaid svg, div.plantuml svg, img');
     targets.forEach(function (el) {
       if (el.dataset.zoomable === '1') return;
       el.dataset.zoomable = '1';
@@ -181,6 +181,8 @@
   img { max-width: 100%; }
   a { color: #0969da; }
   .mermaid { text-align: center; }
+  .plantuml { text-align: center; }
+  .plantuml svg { max-width: 100%; height: auto; }
   /* ---- lightbox ---- */
   #md-lightbox {
     position: fixed; inset: 0; z-index: 9999;

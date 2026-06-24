@@ -40,6 +40,12 @@
 ;; happily re-attaches and the next session hangs at `:starting'.
 (setq lsp-go-gopls-server-args nil)
 
+;; Pyright provides Python symbol completion / types / imports.
+;; Ruff handles lint + format. Loading lsp-pyright registers it as
+;; an lsp client so it co-runs with ruff in python-mode buffers.
+(with-eval-after-load 'lsp-mode
+  (require 'lsp-pyright))
+
 (with-eval-after-load 'projectile
   (add-to-list 'projectile-ignored-projects (expand-file-name "~/")))
 
@@ -66,14 +72,19 @@
          (jar    (when latest (expand-file-name "libexec/plantuml.jar" latest))))
     (when (and jar (file-exists-p jar))
       (setq org-plantuml-jar-path jar
-            plantuml-jar-path jar
-            plantuml-default-exec-mode 'jar)))
+            plantuml-jar-path jar)))
 
-  ;; Route ob-plantuml through the `plantuml' wrapper script instead of
-  ;; `java -jar …' directly. macOS ships a /usr/bin/java stub that only
-  ;; pops the "install Java" dialog; the wrapper hard-codes the brew-
-  ;; installed openjdk path, so PlantUML actually runs.
-  (setq org-plantuml-exec-mode 'plantuml)
+  ;; Route ob-plantuml AND plantuml-mode's preview through the `plantuml'
+  ;; wrapper script instead of `java -jar …' directly. macOS ships a
+  ;; /usr/bin/java stub that only pops the "install Java" dialog — its
+  ;; output ("Unable to locate a Java Runtime") doesn't match
+  ;; plantuml-mode's java-version regex, so jar-mode preview dies with
+  ;; "Search failed: java.version = …". The brew wrapper hard-codes the
+  ;; brew openjdk path, so PlantUML actually runs.
+  (setq org-plantuml-exec-mode 'plantuml
+        plantuml-default-exec-mode 'executable
+        plantuml-executable-path (or (executable-find "plantuml")
+                                     "/opt/homebrew/bin/plantuml"))
 
   ;; Languages we execute in babel blocks. PlantUML + dot cover every
   ;; diagram shape; typescript + shell + emacs-lisp are for literate
@@ -548,8 +559,210 @@ manage its dynamic padding+bg-color rendering."
         markdown-enable-math t
         markdown-asymmetric-header t
         markdown-display-remote-images t
-        markdown-max-image-size '(800 . 800)))
+        markdown-max-image-size '(800 . 800)
+        markdown-indent-on-enter 'indent-and-new-item)
+  ;; Renumber ordered lists after promote/demote so nested levels
+  ;; restart at 1, like in most other markdown editors.
+  (defun my/markdown-cleanup-list-numbers (&rest _)
+    (save-excursion (markdown-cleanup-list-numbers))
+    ;; Re-propertize so the next RET sees the renumbered items as list items.
+    (markdown-syntax-propertize-list-items (point-min) (point-max)))
+  (advice-add 'markdown-demote-list-item :after #'my/markdown-cleanup-list-numbers)
+  (advice-add 'markdown-promote-list-item :after #'my/markdown-cleanup-list-numbers)
+  ;; TAB / S-TAB on a list item demotes / promotes it (with renumbering).
+  ;; Off a list item, fall back to the default markdown-cycle behaviour.
+  ;; Force a fresh propertize on the current line first — without it,
+  ;; freshly-typed list items aren't recognised by `markdown-cur-list-item-bounds'
+  ;; and TAB would fall through to inserting raw whitespace, breaking indents.
+  (defun my/markdown-on-list-item-p ()
+    (save-excursion
+      (markdown-syntax-propertize-list-items
+       (line-beginning-position) (line-end-position))
+      (or (markdown-cur-list-item-bounds)
+          (save-excursion
+            (beginning-of-line)
+            (looking-at-p "^[ \t]*\\(?:[0-9]+\\.\\|[-*+]\\)[ \t]+")))))
+  (defun my/markdown-tab-or-demote ()
+    (interactive)
+    (if (my/markdown-on-list-item-p)
+        (markdown-demote-list-item)
+      (call-interactively #'markdown-cycle)))
+  (defun my/markdown-shifttab-or-promote ()
+    (interactive)
+    (if (my/markdown-on-list-item-p)
+        (markdown-promote-list-item)
+      (call-interactively #'markdown-shifttab)))
+  (define-key markdown-mode-map (kbd "TAB") #'my/markdown-tab-or-demote)
+  (define-key markdown-mode-map (kbd "<backtab>") #'my/markdown-shifttab-or-promote)
+  (define-key markdown-mode-map (kbd "S-TAB") #'my/markdown-shifttab-or-promote))
 (add-hook 'markdown-mode-hook #'markdown-toggle-inline-images)
+
+;; ----- in-buffer plantuml rendering for markdown -----
+;; Fenced ```plantuml blocks render to PNG via the local `plantuml' binary
+;; and display as an overlay under the block — the markdown analogue of
+;; org's `claude-collab-auto-render-diagrams-mode'. markdown has no `:file'
+;; header / `#+RESULTS:' convention, so we manage the overlays directly.
+;;
+;; PNGs are content-addressed (`<md5(body)>.png') in a cache dir, so editing
+;; a block just changes its target filename — no hash-comparison bookkeeping
+;; is needed and identical blocks share one render. Each refresh rebuilds the
+;; overlays in a single pass (no visible flicker — overlays aren't redrawn
+;; until the screen updates) and only spawns a render when the PNG is absent.
+
+(defcustom my/markdown-plantuml-cache-dir
+  (expand-file-name "markdown-plantuml/"
+                    (or (bound-and-true-p spacemacs-cache-directory)
+                        temporary-file-directory))
+  "Directory holding PNGs rendered from markdown plantuml blocks."
+  :type 'directory
+  :group 'markdown)
+
+(defcustom my/markdown-plantuml-idle-delay 1.5
+  "Seconds of idle before re-rendering changed markdown plantuml blocks."
+  :type 'number
+  :group 'markdown)
+
+(defvar my/markdown-plantuml--rendering nil
+  "Non-nil while a refresh pass runs; suppresses re-entrant scheduling.")
+
+(defvar-local my/markdown-plantuml--timer nil
+  "Buffer-local idle timer coalescing refreshes after edits / renders.")
+(defvar-local my/markdown-plantuml--overlays nil
+  "List of inline-image overlays this buffer currently displays.")
+(defvar-local my/markdown-plantuml--in-flight nil
+  "Body hashes whose render subprocess is still running (avoids double-spawn).")
+
+(defun my/markdown-plantuml--blocks ()
+  "Return a list of (HASH BODY END-POS) for each ```plantuml fenced block.
+END-POS is the end of the closing-fence line, where the image overlay sits."
+  (let (blocks)
+    (save-excursion
+      (goto-char (point-min))
+      (while (re-search-forward "^[ \t]*```[ \t]*plantuml[ \t]*$" nil t)
+        (let ((body-start (line-beginning-position 2)))
+          (when (re-search-forward "^[ \t]*```[ \t]*$" nil t)
+            (let* ((body-end (line-beginning-position))
+                   (end-pos (line-end-position))
+                   (body (buffer-substring-no-properties body-start body-end)))
+              (push (list (md5 body) body end-pos) blocks))))))
+    (nreverse blocks)))
+
+(defun my/markdown-plantuml--clear-overlays ()
+  "Delete all inline plantuml overlays in the current buffer."
+  (mapc #'delete-overlay my/markdown-plantuml--overlays)
+  (setq my/markdown-plantuml--overlays nil))
+
+(defun my/markdown-plantuml--add-overlay (end-pos png)
+  "Show PNG on its own line just after END-POS via an `after-string' overlay.
+The image carries no baked colors, so it reads correctly in both solarized
+variants."
+  (let* ((size markdown-max-image-size)   ; (W . H) or nil — `*-safe' tolerates both
+         (img  (create-image png 'png nil
+                             :max-width (car-safe size) :max-height (cdr-safe size)))
+         (ov   (make-overlay end-pos end-pos)))
+    (overlay-put ov 'my/markdown-plantuml t)
+    (overlay-put ov 'after-string
+                 (concat "\n" (propertize " " 'display img) "\n"))
+    (push ov my/markdown-plantuml--overlays)))
+
+(defun my/markdown-plantuml--render-async (body png buf hash)
+  "Render plantuml BODY to PNG in a background process, keyed by HASH.
+On success, schedules a refresh of BUF so the now-present PNG is overlaid;
+on failure, surfaces plantuml's stderr and releases the in-flight lock so
+the next edit retries. Mirrors `claude-collab--render-plantuml-async'."
+  (let ((plantuml (executable-find "plantuml")))
+    (if (not plantuml)
+        (progn
+          (message "markdown-plantuml: `plantuml' not on exec-path; skipping render")
+          (when (buffer-live-p buf)
+            (with-current-buffer buf
+              (setq my/markdown-plantuml--in-flight
+                    (delete hash my/markdown-plantuml--in-flight)))))
+      (let* ((outdir     (file-name-directory png))
+             ;; Give the temp .puml the PNG's basename (the body hash) so
+             ;; `plantuml -o' writes exactly `<hash>.png' into the cache dir.
+             (puml       (concat (file-name-sans-extension png) ".puml"))
+             (stderr-buf (generate-new-buffer " *md-plantuml-stderr*")))
+        (make-directory outdir t)
+        (with-temp-file puml (insert body))
+        (make-process
+         :name (format "md-plantuml-%s" (file-name-nondirectory png))
+         :noquery t
+         :command (list plantuml "-tpng" "-o" outdir puml)
+         :stderr stderr-buf
+         :sentinel
+         (lambda (proc _event)
+           (when (memq (process-status proc) '(exit signal))
+             (let ((ok (zerop (process-exit-status proc))))
+               (unwind-protect
+                   (progn
+                     ;; Release the in-flight lock (always); on success also
+                     ;; invalidate the cached bitmap and schedule the overlay.
+                     (when (buffer-live-p buf)
+                       (with-current-buffer buf
+                         (setq my/markdown-plantuml--in-flight
+                               (delete hash my/markdown-plantuml--in-flight))
+                         (when ok
+                           (clear-image-cache png)
+                           (my/markdown-plantuml--schedule))))
+                     (unless ok
+                       (message "markdown-plantuml: render failed (%s): %s"
+                                (process-exit-status proc)
+                                (with-current-buffer stderr-buf
+                                  (string-trim (buffer-string))))))
+                 (ignore-errors (delete-file puml))
+                 (when (buffer-live-p stderr-buf) (kill-buffer stderr-buf)))))))))))
+
+(defun my/markdown-plantuml--refresh (&optional buf)
+  "Rebuild inline plantuml overlays in BUF; spawn renders for missing PNGs."
+  (let ((buf (or buf (current-buffer))))
+    (when (and (buffer-live-p buf) (not my/markdown-plantuml--rendering))
+      (with-current-buffer buf
+        (when (derived-mode-p 'markdown-mode)
+          (let ((my/markdown-plantuml--rendering t))
+            ;; No `make-directory' here — `--render-async' creates the cache
+            ;; dir before writing, so the only consumer guarantees it exists.
+            (my/markdown-plantuml--clear-overlays)
+            (dolist (b (my/markdown-plantuml--blocks))
+              (pcase-let* ((`(,hash ,body ,end-pos) b)
+                           (png (expand-file-name (concat hash ".png")
+                                                  my/markdown-plantuml-cache-dir)))
+                (if (file-exists-p png)
+                    (my/markdown-plantuml--add-overlay end-pos png)
+                  (unless (member hash my/markdown-plantuml--in-flight)
+                    (push hash my/markdown-plantuml--in-flight)
+                    (my/markdown-plantuml--render-async body png buf hash)))))))))))
+
+(defun my/markdown-plantuml--schedule (&rest _)
+  "Debounce `my/markdown-plantuml--refresh' on an idle timer.
+Serves both as an `after-change-functions' / `after-save-hook' entry and as
+the async-render completion callback."
+  (unless my/markdown-plantuml--rendering
+    (when (timerp my/markdown-plantuml--timer)
+      (cancel-timer my/markdown-plantuml--timer))
+    (let ((buf (current-buffer)))
+      (setq my/markdown-plantuml--timer
+            (run-with-idle-timer
+             my/markdown-plantuml-idle-delay nil
+             (lambda () (my/markdown-plantuml--refresh buf)))))))
+
+(define-minor-mode my/markdown-plantuml-inline-mode
+  "Render fenced ```plantuml blocks as inline images below each block.
+Renders run async via `make-process'; previews refresh after a short idle."
+  :lighter " md-puml"
+  (if my/markdown-plantuml-inline-mode
+      (progn
+        (add-hook 'after-change-functions #'my/markdown-plantuml--schedule nil t)
+        (add-hook 'after-save-hook #'my/markdown-plantuml--schedule nil t)
+        (my/markdown-plantuml--schedule))
+    (remove-hook 'after-change-functions #'my/markdown-plantuml--schedule t)
+    (remove-hook 'after-save-hook #'my/markdown-plantuml--schedule t)
+    (when (timerp my/markdown-plantuml--timer)
+      (cancel-timer my/markdown-plantuml--timer)
+      (setq my/markdown-plantuml--timer nil))
+    (my/markdown-plantuml--clear-overlays)))
+
+(add-hook 'markdown-mode-hook #'my/markdown-plantuml-inline-mode)
 
 ;; ----- xwidget-webkit-powered markdown preview -----
 ;; Pandoc renders the buffer to self-contained HTML that includes mermaid.js
@@ -563,9 +776,16 @@ manage its dynamic padding+bg-color rendering."
   (expand-file-name "assets/markdown-preview-header.html" dotspacemacs-directory)
   "Path to the pandoc header-include used by the markdown preview.")
 
+(defvar my/markdown-plantuml-lua-filter
+  (expand-file-name "assets/pandoc-plantuml.lua" dotspacemacs-directory)
+  "Pandoc Lua filter that renders fenced plantuml blocks to inline SVG.
+PlantUML has no client-side JS renderer (it needs Java), so the filter
+shells out to the local `plantuml' binary during pandoc conversion.")
+
 (setq markdown-command
       (format (concat "pandoc --from=gfm+sourcepos --to=html5 --standalone --mathjax "
-                      "--highlight-style=pygments --include-in-header=%s")
+                      "--highlight-style=pygments --lua-filter=%s --include-in-header=%s")
+              (shell-quote-argument my/markdown-plantuml-lua-filter)
               (shell-quote-argument my/markdown-preview-header-file)))
 
 (defun my/markdown-live-preview-window-xwidget (file)
@@ -959,15 +1179,16 @@ Navigate          Stage/Commit       Remote            Branches & Logs    Forge 
 (spacemacs/set-leader-keys "oms" #'monday-docs-sync
                            "oma" #'monday-docs-sync-abort)
 
-;; Override Spacemacs' default `SPC m e' (org-export-dispatch) with our
-;; pandoc+typst PDF builder. Same script `monday-docs-sync-pre-sync-command'
-;; uses, so the ad-hoc preview and the synced attachment are byte-identical.
-;; Async — Emacs stays responsive while pandoc + typst run; stderr lands in
-;; *org-build-pdf* on failure.
+;; `SPC m e p' — pandoc+typst PDF builder. Same script
+;; `monday-docs-sync-pre-sync-command' uses, so the ad-hoc preview and
+;; the synced attachment are byte-identical. Async — Emacs stays
+;; responsive while pandoc + typst run; stderr lands in *org-build-pdf*
+;; on failure. Bound under the `e' prefix (alongside `ee' export-dispatch
+;; and `em' org-mime-htmlize); binding bare `e' would break the prefix.
 (with-eval-after-load 'org
   (when (fboundp 'spacemacs/set-leader-keys-for-major-mode)
     (spacemacs/set-leader-keys-for-major-mode
-      'org-mode "e" #'my/org-build-pdf)))
+      'org-mode "ep" #'my/org-build-pdf)))
 (defun my/org-build-pdf ()
   "Run `bin/build-pdf.sh' on the current org file, then `open' the PDF."
   (interactive)

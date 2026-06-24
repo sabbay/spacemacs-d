@@ -32,14 +32,15 @@ This function should only modify configuration layer settings."
 
    ;; List of configuration layers to load.
    dotspacemacs-configuration-layers
-   '(go
+   '(python
+     go
      html
      ;; ----------------------------------------------------------------
      ;; Example of useful layers you may want to use right away.
      ;; Uncomment some layer names and press `SPC f e R' (Vim style) or
      ;; `M-m f e R' (Emacs style) to install them.
      ;; ----------------------------------------------------------------
-     ;; auto-completion
+     auto-completion
      ;; better-defaults
      emacs-lisp
      git
@@ -629,37 +630,43 @@ This function is called at the very end of Spacemacs initialization."
        "7fea145741b3ca719ae45e6533ad1f49b2a43bf199d9afaee5b6135fd9e6f9b8" default))
    '(package-selected-packages
      '(ace-link acp add-node-modules-path agent-shell aggressive-indent all-the-icons
-                auto-compile auto-highlight-symbol avy-jump-helm-line bui
-                centered-cursor-mode clean-aindent-mode column-enforce-mode
-                company-go company-web counsel counsel-css dap-mode define-word
-                devdocs diminish dired-quick-sort disable-mouse dotenv-mode
-                drag-stuff dumb-jump elisp-def elisp-demos elisp-slime-nav
-                emmet-mode emr eval-sexp-fu evil-anzu evil-args evil-cleverparens
-                evil-collection evil-easymotion evil-escape evil-evilified-state
-                evil-exchange evil-goggles evil-iedit-state evil-indent-plus
-                evil-lion evil-lisp-state evil-matchit evil-mc evil-nerd-commenter
+                anaconda-mode auto-compile auto-highlight-symbol
+                avy-jump-helm-line blacken bui centered-cursor-mode
+                clean-aindent-mode code-cells column-enforce-mode company-anaconda
+                company-go company-web compat concurrent cond-let counsel
+                counsel-css ctable cython-mode dap-mode define-word devdocs
+                diminish dired-quick-sort disable-mouse dotenv-mode drag-stuff
+                dumb-jump elisp-def elisp-demos elisp-slime-nav emmet-mode emr epc
+                eval-sexp-fu evil-anzu evil-args evil-cleverparens evil-collection
+                evil-easymotion evil-escape evil-evilified-state evil-exchange
+                evil-goggles evil-iedit-state evil-indent-plus evil-lion
+                evil-lisp-state evil-matchit evil-mc evil-nerd-commenter
                 evil-numbers evil-surround evil-textobj-line evil-tutor
                 evil-unimpaired evil-visual-mark-mode evil-visualstar
                 exec-path-from-shell expand-region eyebrowse fancy-battery
                 flycheck-golangci-lint ggtags go-eldoc go-fill-struct go-gen-test
                 go-guru go-impl go-mode go-rename go-tag godoctor golden-ratio
-                google-translate haml-mode helm-ag helm-comint helm-css-scss
-                helm-descbinds helm-make helm-mode-manager helm-org
-                helm-projectile helm-purpose helm-swoop helm-xref hide-comnt
-                highlight-indentation highlight-numbers highlight-parentheses
-                hl-todo holy-mode htmlize hungry-delete hybrid-mode impatient-mode
-                indent-guide info+ inspector ivy link-hint lorem-ipsum lsp-docker
-                macrostep multi-line nameless open-junk-file org org-modern
-                org-remark org-superstar overseer page-break-lines paradox
-                password-generator pcre2el plantuml-mode plz popwin pug-mode
-                quickrun rainbow-delimiters restart-emacs sass-mode scss-mode
-                shell-maker slim-mode space-doc spaceline spacemacs-purpose-popwin
-                spacemacs-whitespace-cleanup string-edit-at-point
-                string-inflection swiper symbol-overlay symon tagedit term-cursor
-                toc-org transient treemacs-evil treemacs-icons-dired
-                treemacs-persp treemacs-projectile undo-fu-session uuidgen
-                vi-tilde-fringe volatile-highlights vundo web-completion-data
-                web-mode wgrep winum writeroom-mode ws-butler yaml-mode)))
+                google-translate haml-mode helm-ag helm-comint helm-cscope
+                helm-css-scss helm-descbinds helm-make helm-mode-manager helm-org
+                helm-projectile helm-purpose helm-pydoc helm-swoop helm-xref
+                hide-comnt highlight-indentation highlight-numbers
+                highlight-parentheses hl-todo holy-mode htmlize hungry-delete
+                hybrid-mode impatient-mode importmagic indent-guide info+
+                inspector ivy link-hint live-py-mode load-env-vars lorem-ipsum
+                lsp-docker lsp-pyright macrostep multi-line nameless nose
+                open-junk-file org org-modern org-remark org-superstar overseer
+                page-break-lines paradox password-generator pcre2el pet
+                pip-requirements pipenv pippel plantuml-mode plz poetry popwin
+                pug-mode py-isort pydoc pyenv-mode pylookup python-pytest pythonic
+                pyvenv quickrun rainbow-delimiters reformatter restart-emacs
+                ruff-format sass-mode scss-mode shell-maker slim-mode space-doc
+                spaceline spacemacs-purpose-popwin spacemacs-whitespace-cleanup
+                sphinx-doc string-edit-at-point string-inflection swiper
+                symbol-overlay symon tagedit term-cursor toc-org transient
+                treemacs-evil treemacs-icons-dired treemacs-persp
+                treemacs-projectile undo-fu-session uuidgen uv vi-tilde-fringe
+                volatile-highlights vundo web-completion-data web-mode wgrep winum
+                writeroom-mode ws-butler xcscope yaml-mode yapfify)))
   (custom-set-faces
    ;; custom-set-faces was added by Custom.
    ;; If you edit it by hand, you could mess it up, so be careful.
